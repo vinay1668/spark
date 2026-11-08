@@ -1,0 +1,30 @@
+{
+  "name": "spark-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "build": "npm run build -w @spark/contracts && npm run build -w @spark/sdk && npm run build -w @spark/server && npm run build -w @spark/mcp && npm run build -w @spark/web-react",
+    "build:legacy": "npm run build -w @spark/web",
+    "typecheck": "npm run typecheck -w @spark/contracts && npm run typecheck -w @spark/sdk && npm run typecheck -w @spark/server && npm run typecheck -w @spark/mcp && npm run check -w @spark/web-react && npm run check -w @spark/web",
+    "dev": "npm run dev -w @spark/server",
+    "dev:all": "node scripts/dev-all.mjs",
+    "dev:all:legacy": "node scripts/dev-all.mjs --legacy",
+    "start": "npm run start -w @spark/server",
+    "demo": "npm run demo -w @spark/server",
+    "web": "npm run dev -w @spark/web-react",
+    "web:preview": "npm run dev:preview -w @spark/web-react",
+    "web:legacy": "npm run dev -w @spark/web",
+    "mcp": "npm run start -w @spark/mcp",
+    "mcp:check": "npm run check -w @spark/mcp",
+    "key:issue": "npm run key:issue -w @spark/server --",
+    "key:revoke": "npm run key:revoke -w @spark/server --",
+    "agent:promote": "npm run agent:promote -w @spark/server --"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  },
+  "engines": { "node": ">=22" }
+}

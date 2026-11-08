@@ -1,0 +1,23 @@
+{
+  "name": "@spark/web-react",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 4328",
+    "dev:preview": "vite --host 127.0.0.1 --port 4330",
+    "build": "vite build",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "three": "^0.170.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.2.1",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.6"
+  }
+}

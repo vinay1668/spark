@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <style>
+    :root { color-scheme: light dark; }
+    .head { fill: #f9c762; stroke: #26364d; stroke-width: .8; }
+    .body { fill: #365dcf; stroke: #26364d; stroke-width: .8; }
+    .visor { fill: #182031; }
+    .eye { fill: #f9c762; }
+    .purple { fill: #8b78c9; }
+    .blue { fill: #365dcf; }
+    .line { fill: #26364d; }
+    @media (prefers-color-scheme: dark) {
+      .head { fill: #f4c469; stroke: #3b4563; }
+      .body { fill: #8ca8ff; stroke: #3b4563; }
+      .visor { fill: #0e121d; }
+      .eye { fill: #f4c469; }
+      .purple { fill: #b0a0e8; }
+      .blue { fill: #8ca8ff; }
+      .line { fill: #3b4563; }
+    }
+  </style>
+  <rect class="purple" x="10" y="23" width="4" height="6"/>
+  <rect class="blue" x="18" y="23" width="4" height="6"/>
+  <rect class="body" x="8" y="16" width="16" height="9" rx="2"/>
+  <rect class="purple" x="11" y="19" width="10" height="4" rx="1"/>
+  <rect class="purple" x="5" y="18" width="3" height="6" rx="1"/>
+  <rect class="purple" x="24" y="18" width="3" height="6" rx="1"/>
+  <rect class="eye" x="27" y="20" width="4" height="4" rx=".5"/>
+  <rect class="head" x="7" y="7" width="18" height="11" rx="2"/>
+  <rect class="purple" x="5" y="10" width="3" height="5"/>
+  <rect class="blue" x="24" y="10" width="3" height="5"/>
+  <rect class="visor" x="10" y="10" width="12" height="5" rx="1"/>
+  <rect class="eye" x="12" y="12" width="2" height="2"/>
+  <rect class="eye" x="18" y="12" width="2" height="2"/>
+  <rect class="line" x="15" y="3" width="2" height="4"/>
+  <rect class="blue" x="14" y="1" width="4" height="2" rx="1"/>
+</svg>

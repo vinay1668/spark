@@ -1,0 +1,11 @@
+{
+  "name": "@spark/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node dev-server.mjs",
+    "build": "node build.mjs",
+    "check": "node --check public/app.js && node --check public/identity.js && node --check dev-server.mjs && node --check build.mjs"
+  }
+}
