@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
@@ -21,25 +21,107 @@ if (!serverEnv.DATABASE_URL && !serverEnv.SPARK_DEV_API_KEY) {
   console.log(serverEnv.SPARK_DEV_API_KEY);
   console.log("Paste it into a task's Claim task panel. It expires when this process stops.\n");
 }
-const processes = [
-  spawn(process.execPath, [tsxCli, "watch", "src/server.ts"], {
-    cwd: serverRoot,
-    stdio: "inherit",
-    env: serverEnv,
-    detached,
-  }),
-  webWorkspace === "@spark/web-react"
-    ? spawn(process.execPath, [viteCli, "--host", "127.0.0.1", "--port", "4328"], {
-        cwd: reactRoot,
-        stdio: "inherit",
-        detached,
-      })
-    : spawn(process.execPath, [fileURLToPath(new URL("../apps/web/dev-server.mjs", import.meta.url))], {
-        cwd: legacyRoot,
-        stdio: "inherit",
-        detached,
-      }),
-];
+const processes = [];
+const apiPort = Number(serverEnv.PORT ?? 4010);
+const webPort = 4328;
+
+function listeningPids(port) {
+  if (process.platform === "win32") return [];
+  try {
+    return execFileSync("lsof", [`-tiTCP:${port}`, "-sTCP:LISTEN"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .split(/\s+/)
+      .filter(Boolean)
+      .map(Number)
+      .filter(Number.isInteger);
+  } catch {
+    return [];
+  }
+}
+
+async function replaceExistingSparkProcesses() {
+  const ports = [apiPort, webPort];
+  const pids = [...new Set(ports.flatMap(listeningPids))];
+  if (pids.length === 0) return;
+
+  console.log(`Replacing existing Spark process${pids.length === 1 ? "" : "es"} on port${pids.length === 1 ? "" : "s"} ${ports.join(" and ")}...`);
+  for (const pid of pids) {
+    try { process.kill(pid, "SIGTERM"); } catch (error) {
+      if (error?.code !== "ESRCH") console.warn(`Could not stop process ${pid}: ${error.message}`);
+    }
+  }
+
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (ports.every((port) => listeningPids(port).length === 0)) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  for (const port of ports) {
+    for (const pid of listeningPids(port)) {
+      try { process.kill(pid, "SIGKILL"); } catch (error) {
+        if (error?.code !== "ESRCH") console.warn(`Could not force-stop process ${pid}: ${error.message}`);
+      }
+    }
+  }
+}
+
+await replaceExistingSparkProcesses();
+
+function spawnChild(command, args, options) {
+  const child = spawn(command, args, options);
+  processes.push(child);
+  return child;
+}
+
+const serverProcess = spawnChild(process.execPath, [tsxCli, "watch", "src/server.ts"], {
+  cwd: serverRoot,
+  stdio: "inherit",
+  env: serverEnv,
+  detached,
+});
+
+async function waitForApi() {
+  const deadline = Date.now() + 30_000;
+  const healthUrl = `http://127.0.0.1:${apiPort}/health`;
+  while (Date.now() < deadline) {
+    if (serverProcess.exitCode !== null || serverProcess.signalCode) {
+      throw new Error("Spark API stopped before becoming ready");
+    }
+    try {
+      const response = await fetch(healthUrl);
+      if (response.ok) return;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  throw new Error(`Spark API did not become ready at ${healthUrl}`);
+}
+
+try {
+  await waitForApi();
+} catch (error) {
+  console.error(error.message);
+  process.exitCode = 1;
+  process.kill(process.pid, "SIGTERM");
+}
+
+if (!process.exitCode) {
+  if (webWorkspace === "@spark/web-react") {
+    spawnChild(process.execPath, [viteCli, "--host", "127.0.0.1", "--port", "4328"], {
+      cwd: reactRoot,
+      stdio: "inherit",
+      detached,
+    });
+  } else {
+    spawnChild(
+      process.execPath,
+      [fileURLToPath(new URL("../apps/web/dev-server.mjs", import.meta.url))],
+      { cwd: legacyRoot, stdio: "inherit", detached },
+    );
+  }
+}
 
 let stopping = false;
 function stop(signal = "SIGTERM") {

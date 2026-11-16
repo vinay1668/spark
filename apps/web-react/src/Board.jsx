@@ -5,6 +5,8 @@ import {
   isAuthenticated,
 } from "./identity.js";
 import { CommentThread } from "./CommentThread.jsx";
+import { AttachmentInput } from "./AttachmentInput.jsx";
+import { PixelLoader } from "./PixelLoader.jsx";
 
 const api = (path) => `/api${path}`;
 const esc = (value) => String(value ?? "");
@@ -133,6 +135,23 @@ function DetailsDialog({ state, entries, onClose }) {
           <p>{entry.requestedAction}</p>
         </section>
       )}
+      {entry.attachments?.length > 0 && (
+        <section>
+          <span className="detail-label">Attachments</span>
+          <div className="entry-attachments">
+            {entry.attachments.map((attachment) => (
+              <a
+                key={attachment.id}
+                href={attachment.url}
+                target="_blank"
+                rel="noreferrer"
+              >
+                📎 {attachment.name}
+              </a>
+            ))}
+          </div>
+        </section>
+      )}
     </dialog>
   );
 }
@@ -196,6 +215,20 @@ function Entry({ state, children, depth, onOpen, onComment, onVote }) {
       )}
       <h3>{entry.summary}</h3>
       {entry.details && <p>{entry.details}</p>}
+      {entry.attachments?.length > 0 && (
+        <div className="entry-attachments">
+          {entry.attachments.map((attachment) => (
+            <a
+              key={attachment.id}
+              href={attachment.url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              📎 {attachment.name}
+            </a>
+          ))}
+        </div>
+      )}
       <div className="board-entry-foot">
         <button
           className="reply-to"
@@ -210,7 +243,7 @@ function Entry({ state, children, depth, onOpen, onComment, onVote }) {
         </button>
         <Vote state={state} onVote={onVote} />
       </div>
-      {children}
+      {children && <div className="board-entry-children">{children}</div>}
     </article>
   );
 }
@@ -232,6 +265,7 @@ export function Board({ missionId, tasks = [] }) {
   const [taskId, setTaskId] = useState("");
   const [evidenceUrl, setEvidenceUrl] = useState("");
   const [evidenceSummary, setEvidenceSummary] = useState("");
+  const [attachments, setAttachments] = useState([]);
   const [posting, setPosting] = useState(false);
   const [error, setError] = useState("");
   const load = useCallback(async () => {
@@ -351,32 +385,38 @@ export function Board({ missionId, tasks = [] }) {
     event.preventDefault();
     if (!summary.trim() || posting) return;
     setPosting(true);
-    const response = await post(`/v1/missions/${missionId}/board`, {
-      type: entryType,
-      summary: summary.trim(),
-      details: details.trim() || undefined,
-      taskId: taskId || undefined,
-      evidence: evidenceSummary
-        ? [
-            {
-              kind: "OTHER",
-              ...(evidenceUrl ? { uri: evidenceUrl } : {}),
-              summary: evidenceSummary,
-            },
-          ]
-        : [],
-      references: replyTarget
-        ? [{ entryId: replyTarget, relation: "REPLIES_TO" }]
-        : [],
-      tags: tags
-        .split(",")
-        .map((tag) => tag.trim())
-        .filter(Boolean),
-      confidence,
-      requestedAction: requestedAction.trim() || undefined,
-      idempotencyKey: crypto.randomUUID(),
-    });
-    if (response.ok) {
+    setError("");
+    try {
+      const response = await post(`/v1/missions/${missionId}/board`, {
+        type: entryType,
+        summary: summary.trim(),
+        details: details.trim() || undefined,
+        taskId: taskId || undefined,
+        evidence: evidenceSummary
+          ? [
+              {
+                kind: "OTHER",
+                ...(evidenceUrl ? { uri: evidenceUrl } : {}),
+                summary: evidenceSummary,
+              },
+            ]
+          : [],
+        attachments,
+        references: replyTarget
+          ? [{ entryId: replyTarget, relation: "REPLIES_TO" }]
+          : [],
+        tags: tags
+          .split(",")
+          .map((tag) => tag.trim())
+          .filter(Boolean),
+        confidence,
+        requestedAction: requestedAction.trim() || undefined,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.message || payload.error || "Could not publish to the board");
+      }
       setSummary("");
       setDetails("");
       setTags("");
@@ -384,11 +424,15 @@ export function Board({ missionId, tasks = [] }) {
       setTaskId("");
       setEvidenceUrl("");
       setEvidenceSummary("");
+      setAttachments([]);
       setReplyTarget(null);
       setComposerOpen(false);
       await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not publish to the board");
+    } finally {
+      setPosting(false);
     }
-    setPosting(false);
   }
   return (
     <>
@@ -565,8 +609,13 @@ export function Board({ missionId, tasks = [] }) {
                   />
                 </label>
               </div>
+              <AttachmentInput
+                attachments={attachments}
+                onChange={setAttachments}
+                disabled={posting}
+              />
               <details className="evidence-fields">
-                <summary>+ Attach evidence</summary>
+                <summary>+ Attach evidence link</summary>
                 <div className="composer-grid">
                   <label>
                     <span>Evidence URL</span>
@@ -606,11 +655,11 @@ export function Board({ missionId, tasks = [] }) {
                   Cancel
                 </button>
                 <button
-                  className="button primary"
+                  className={`button primary ${posting ? "loading" : ""}`}
                   disabled={posting}
                   type="submit"
                 >
-                  {posting ? "Publishing…" : "Publish to board ↗"}
+                  {posting ? <PixelLoader /> : "Publish to board ↗"}
                 </button>
               </div>
             </form>

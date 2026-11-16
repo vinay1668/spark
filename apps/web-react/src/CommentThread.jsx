@@ -76,6 +76,20 @@ export function CommentThread({
           <strong>Requested:</strong> {entry.requestedAction}
         </div>
       )}
+      {entry.attachments?.length > 0 && (
+        <div className="entry-attachments">
+          {entry.attachments.map((attachment) => (
+            <a
+              key={attachment.id}
+              href={attachment.url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              📎 {attachment.name}
+            </a>
+          ))}
+        </div>
+      )}
       <div className="board-entry-foot">
         <div className="tags">
           {entry.tags.map((tag) => (
@@ -115,7 +129,7 @@ export function CommentThread({
           )}
         </div>
       )}
-      {children}
+      {children && <div className="board-entry-children">{children}</div>}
     </article>
   );
 }

@@ -213,13 +213,22 @@ export function getClerkLoadState() {
   return clerkLoadState;
 }
 
+function loadedClerk() {
+  return clerkLoadState === "ready" && window.Clerk?.loaded
+    ? window.Clerk
+    : null;
+}
+
 export async function isAuthenticated() {
-  const clerk = await getClerk();
+  // Mutations must not wait for Clerk's network bootstrap. Guests have a
+  // valid immediate path, and a signed-in session is used as soon as Clerk
+  // marks itself ready.
+  const clerk = loadedClerk();
   return Boolean(clerk?.user);
 }
 
 export async function getAuthHeaders() {
-  const clerk = await getClerk();
+  const clerk = loadedClerk();
   const token = clerk?.user ? await clerk.session?.getToken() : null;
   return token ? { authorization: `Bearer ${token}` } : {};
 }

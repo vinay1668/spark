@@ -45,8 +45,33 @@ export interface Mission {
   repositoryUrl?: string | undefined;
   visibility: "PUBLIC";
   status: MissionStatus;
+  /** Closing the goal is explicit; finishing a planning round does not close it. */
+  completion?: { reason: string; actor: Actor; completedAt: string } | undefined;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Small handoff context for agents; history stays available through getMission. */
+export interface MissionProgress {
+  mission: Mission;
+  counts: { tasks: number; verified: number; active: number; blocked: number; cancelled: number; planning: number; selectedPlans: number; releases: number };
+  nextAction: "COMPLETE" | "ABANDONED" | "PLAN" | "REVIEW_PLANS" | "BUILD" | "UNBLOCK";
+  canComplete: boolean;
+  directions: Array<{ gateId: string; title: string; summary: string; selectedAt?: string | undefined; totalTasks: number; verifiedTasks: number; resolvedTasks: number }>;
+  repositories: RepositoryBinding[];
+  codeEvidence: Array<{ contributionId: string; taskId: string; taskTitle: string; author: Actor; status: ContributionStatus; uri: string; summary: string; createdAt: string; repositoryId?: string | undefined }>;
+  latestRelease?: Publication | undefined;
+}
+
+export type MissionAgentInterestStatus = "INTERESTED" | "WITHDRAWN";
+
+export interface MissionAgentInterest {
+  id: string;
+  missionId: string;
+  agent: Actor;
+  status: MissionAgentInterestStatus;
+  optedInAt: string;
+  optedOutAt?: string | undefined;
 }
 
 export interface PlanProposal {
@@ -86,6 +111,7 @@ export interface Task extends TaskDraft {
 export type DecisionGateLevel = "MISSION" | "MILESTONE" | "ARCHITECTURE" | "RECOVERY";
 export type DecisionGateRisk = "LOW" | "HIGH";
 export type DecisionGateStatus = "PROPOSING" | "REVIEWING" | "AWAITING_HUMAN" | "SELECTED" | "PAUSED";
+export type DecisionModel = "AGENT_QUORUM" | "LEGACY";
 
 export interface DecisionGate {
   id: string;
@@ -97,11 +123,15 @@ export interface DecisionGate {
   question: string;
   risk: DecisionGateRisk;
   status: DecisionGateStatus;
+  decisionModel?: DecisionModel | undefined;
   createdBy: Actor;
   proposalClosesAt: string;
   reviewClosesAt: string;
   ownerDecisionClosesAt: string;
   minIndependentBallots: number;
+  interestedAgentCount?: number | undefined;
+  requiredApprovals?: number | undefined;
+  quorumSnapshotAt?: string | undefined;
   autoSelect: boolean;
   fallbackHuman?: Actor | undefined;
   fallbackActivatedAt?: string | undefined;
@@ -112,6 +142,10 @@ export interface DecisionGate {
   fallbackReminderRequestId?: string | undefined;
   /** Set when the system has already asked for the next milestone fork. */
   nextForkSuggestedAt?: string | undefined;
+  /** Timestamp of the most recent proposal submitted to this gate. */
+  lastProposalAt?: string | undefined;
+  /** Timestamp of the most recent ballot cast in this gate. */
+  lastBallotAt?: string | undefined;
   createdAt: string;
   updatedAt: string;
   selectedAt?: string | undefined;
@@ -125,6 +159,7 @@ export interface DecisionProposal {
   title: string;
   summary: string;
   tasks: TaskDraft[];
+  attachments: Attachment[];
   status: "ACTIVE" | "SELECTED" | "REJECTED";
   createdAt: string;
 }
@@ -162,6 +197,8 @@ export interface DecisionGateView {
   proposals: DecisionProposal[];
   ballots: DecisionBallot[];
   ranking: DecisionRankingEntry[];
+  interestedAgentCount: number;
+  requiredApprovals: number;
 }
 
 export interface Claim {
@@ -172,6 +209,16 @@ export interface Claim {
   claimedAt: string;
   lastHeartbeatAt: string;
   expiresAt: string;
+}
+
+export interface Attachment {
+  id: string;
+  name: string;
+  url: string;
+  mimeType: string;
+  size: number;
+  uploadedBy: Actor;
+  uploadedAt: string;
 }
 
 export interface Evidence {
@@ -325,6 +372,7 @@ export type BoardRelationType =
   | "REPLIES_TO"
   | "BUILDS_ON"
   | "CONTRADICTS"
+  | "BLOCKS"
   | "RESOLVES"
   | "SUPERSEDES"
   | "DUPLICATES";
@@ -349,6 +397,7 @@ export interface BoardEntry {
   summary: string;
   details?: string | undefined;
   evidence: Evidence[];
+  attachments: Attachment[];
   references: BoardReference[];
   tags: string[];
   confidence: "LOW" | "MEDIUM" | "HIGH";
@@ -402,7 +451,7 @@ export interface DomainEvent<T = unknown> {
   actor: Actor;
   authority?: DelegatedAuthority | undefined;
   missionId: string;
-  entityType: "MISSION" | "PLAN" | "TASK" | "CLAIM" | "CONTRIBUTION" | "REVIEW" | "HUMAN_REQUEST" | "REPOSITORY" | "DELEGATION" | "PUBLICATION" | "BOARD_ENTRY" | "DECISION_GATE" | "DECISION_PROPOSAL" | "DECISION_BALLOT";
+  entityType: "MISSION" | "PLAN" | "TASK" | "CLAIM" | "CONTRIBUTION" | "REVIEW" | "HUMAN_REQUEST" | "REPOSITORY" | "DELEGATION" | "PUBLICATION" | "BOARD_ENTRY" | "DECISION_GATE" | "DECISION_PROPOSAL" | "DECISION_BALLOT" | "MISSION_AGENT_INTEREST";
   entityId: string;
   occurredAt: string;
   payload: T;

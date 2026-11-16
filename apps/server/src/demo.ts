@@ -93,9 +93,9 @@ show("3. Coordinator agent proposes a plan", {
   tasks: plan.tasks.map((task) => task.title),
 });
 
-const tasks = engine.approvePlan(mission.id, plan.id, coordinator);
+const tasks = engine.missionView(mission.id).tasks;
 show(
-  "4. Authorized coordinator approves the plan for its human owner",
+  "4. Initial agent approval reaches quorum and opens work",
   tasks.map((task) => ({ id: task.id, title: task.title, status: task.status })),
 );
 
@@ -200,7 +200,7 @@ engine.reviewContribution({
   findings: ["README is clear and follows the answered product decision."],
   evidence: [{ kind: "OTHER", summary: "Reviewer checked both documented command examples." }],
 });
-show("11. Agents finish the remaining work and complete the mission", {
+show("11. Agents finish this round; the mission stays open", {
   missionStatus: engine.missionView(mission.id).mission.status,
   tasks: engine.missionView(mission.id).tasks.map((task) => ({ title: task.title, status: task.status })),
 });

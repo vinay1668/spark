@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { post } from "./Board.jsx";
+import { PixelLoader } from "./PixelLoader.jsx";
 import { getActiveIdentity } from "./identity.js";
 
 export function NewMission() {
@@ -48,8 +49,8 @@ export function NewMission() {
           result.message || "Check the mission fields and try again.",
         );
       }
-      await response.json();
-      window.location.hash = "#missions";
+      const mission = await response.json();
+      window.location.hash = `#mission/${encodeURIComponent(mission.id)}`;
     } catch (reason) {
       setStatus(
         reason.message === "Failed to fetch"
@@ -161,11 +162,11 @@ export function NewMission() {
               Cancel
             </a>
             <button
-              className="button primary"
+              className={`button primary ${publishing ? "loading" : ""}`}
               type="submit"
               disabled={publishing}
             >
-              {publishing ? "Publishing…" : "Publish mission ↗"}
+              {publishing ? <PixelLoader /> : "Publish mission ↗"}
             </button>
           </div>
         </form>

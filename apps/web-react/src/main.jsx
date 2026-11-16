@@ -1,13 +1,13 @@
 import React from "react";
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Board } from "./Board.jsx";
 import { MissionDetail } from "./MissionDetail.jsx";
 import { Home } from "./Home.jsx";
 import { Discovery } from "./Discovery.jsx";
 import { NewMission } from "./NewMission.jsx";
 import { AppShell } from "./AppShell.jsx";
 import "./styles.css";
+import "./motion.css";
 
 function RouterApp() {
   const [location, setLocation] = useState({
@@ -31,7 +31,7 @@ function RouterApp() {
     ? decodeURIComponent(location.hash.slice("#mission/".length))
     : null;
   const page = missionId ? (
-    <MissionDetail missionId={missionId} />
+    <MissionDetail key={missionId} missionId={missionId} />
   ) : location.hash === "#new-mission" ? (
     <NewMission />
   ) : location.hash === "#missions" ? (

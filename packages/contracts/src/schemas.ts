@@ -14,6 +14,25 @@ export const evidenceSchema = z.object({
   summary: z.string().min(1),
 });
 
+export const attachmentSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string().trim().min(1).max(200),
+  url: z.string().max(4_000).refine((value) => {
+    if (/^\/uploads\/[0-9a-f-]{36}$/i.test(value)) return true;
+    try {
+      return ["http:", "https:"].includes(new URL(value).protocol);
+    } catch {
+      return false;
+    }
+  }, "Expected an HTTP(S) URL or a Spark upload path"),
+  mimeType: z.string().trim().min(1).max(100),
+  size: z.number().int().min(0).max(50 * 1024 * 1024).default(0),
+  uploadedBy: actorSchema,
+  uploadedAt: z.string().datetime(),
+});
+
+export const createAttachmentSchema = attachmentSchema;
+
 export const createMissionSchema = z.object({
   title: z.string().min(3),
   description: z.string().min(10),
@@ -60,9 +79,9 @@ export const createDecisionGateSchema = z.object({
   title: z.string().trim().min(3).max(200),
   question: z.string().trim().min(10).max(2_000),
   risk: z.enum(["LOW", "HIGH"]),
-  proposalHours: z.number().int().min(1).max(168).default(72),
-  reviewHours: z.number().int().min(1).max(168).default(72),
-  ownerGraceHours: z.number().int().min(1).max(168).default(24),
+  proposalHours: z.number().min(0.001).max(168).default(24).optional(),
+  reviewHours: z.number().min(0.001).max(168).default(24).optional(),
+  ownerGraceHours: z.number().min(0.001).max(168).default(24).optional(),
   minIndependentBallots: z.number().int().min(1).max(20).default(3),
   autoSelect: z.boolean().default(true),
   fallbackHumanId: z.string().min(1).max(200).optional(),
@@ -76,17 +95,25 @@ export const submitDecisionProposalSchema = z.object({
   title: z.string().trim().min(3).max(200),
   summary: z.string().trim().min(10).max(5_000),
   tasks: z.array(taskDraftSchema).max(7).default([]),
+  attachments: z.array(createAttachmentSchema).max(10).default([]),
+});
+
+export const agentInterestSchema = z.object({
+  action: z.enum(["JOIN", "LEAVE"]),
 });
 
 export const submitDecisionBallotSchema = z.object({
-  rankedProposalIds: z.array(z.string().uuid()).min(1).max(3)
+  rankedProposalIds: z.array(z.string().uuid()).max(3)
     .refine((values) => new Set(values).size === values.length, { message: "Ranked proposals must be unique" }),
-  rationale: z.string().trim().min(10).max(5_000),
+  rationale: z.string().trim().max(5_000).default(""),
   objections: z.array(z.object({
     proposalId: z.string().uuid(),
     reason: z.string().trim().min(10).max(2_000),
   })).max(3).default([]),
-});
+}).refine(
+  (value) => value.rankedProposalIds.length > 0 || value.objections.length > 0,
+  { message: "A ballot must rank at least one proposal or include at least one objection" },
+);
 
 export const selectDecisionProposalSchema = z.object({
   proposalId: z.string().uuid(),
@@ -229,6 +256,7 @@ export const boardRelationTypeSchema = z.enum([
   "REPLIES_TO",
   "BUILDS_ON",
   "CONTRADICTS",
+  "BLOCKS",
   "RESOLVES",
   "SUPERSEDES",
   "DUPLICATES",
@@ -240,6 +268,7 @@ export const createBoardEntrySchema = z.object({
   summary: z.string().trim().min(3).max(500),
   details: z.string().trim().min(1).max(20_000).optional(),
   evidence: z.array(evidenceSchema).max(30).default([]),
+  attachments: z.array(createAttachmentSchema).max(10).default([]),
   references: z.array(z.object({
     entryId: z.string().uuid(),
     relation: boardRelationTypeSchema,

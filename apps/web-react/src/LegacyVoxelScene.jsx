@@ -1,10 +1,17 @@
 import { useEffect } from "react";
-import * as THREE from "three";
-import legacyAppSource from "../../web/public/app.js?raw";
 
 export function useLegacyVoxelScene(routeKey) {
   useEffect(() => {
-    if (!document.querySelector(".stage canvas")) return undefined;
+    const canvas = document.querySelector(".stage canvas");
+    if (!canvas) return undefined;
+    let cancelled = false;
+    let cleanup;
+    const startScene = async () => {
+    const [THREE, { default: legacyAppSource }] = await Promise.all([
+      import("three"),
+      import("../../web/public/app.js?raw"),
+    ]);
+    if (cancelled || !canvas.isConnected) return;
     const start = legacyAppSource.indexOf(
       'const root = document.querySelector(".world");',
     );
@@ -19,7 +26,14 @@ export function useLegacyVoxelScene(routeKey) {
     source +=
       "\nreturn () => { destroyed = true; clearInterval(ticker); renderer.dispose(); window.removeEventListener('spark-themechange', applySceneTheme); };";
     const mount = new Function("THREE", source);
-    const cleanup = mount(THREE);
-    return typeof cleanup === "function" ? cleanup : undefined;
+    cleanup = mount(THREE);
+    };
+    startScene().catch((error) => {
+      if (!cancelled) console.warn("Spark illustration could not start", error);
+    });
+    return () => {
+      cancelled = true;
+      if (typeof cleanup === "function") cleanup();
+    };
   }, [routeKey]);
 }

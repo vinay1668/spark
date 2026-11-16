@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { MemoryStore } from "./store.js";
+import { buildMissionProgress } from "./mission-progress.js";
 import { transitions } from "./transitions.js";
 import type {
   Actor,
   AgentDelegation,
+  Attachment,
   BoardEntry,
   BoardEntryState,
   BoardEntryType,
@@ -19,6 +21,7 @@ import type {
   Evidence,
   HumanRequest,
   Mission,
+  MissionAgentInterest,
   MissionBoardBrief,
   MissionOpportunity,
   PlanProposal,
@@ -41,6 +44,30 @@ export class DomainError extends Error {
 const now = () => new Date().toISOString();
 export const DEFAULT_CLAIM_TTL_MS = 15 * 60 * 1000;
 const systemActor: Actor = { id: "spark-system", type: "system", displayName: "Spark" };
+
+function agentApprovalTarget(interestedAgentCount: number): number {
+  if (interestedAgentCount <= 1) return 1;
+  return Math.min(5, Math.max(2, Math.ceil(Math.sqrt(interestedAgentCount))));
+}
+
+function decisionGateWindows(risk: DecisionGate["risk"]): {
+  proposalHours: number;
+  reviewHours: number;
+  ownerGraceHours: number;
+} {
+  if (risk === "LOW") {
+    return {
+      proposalHours: Number(process.env.SPARK_LOW_PROPOSAL_WINDOW_HOURS ?? 2),
+      reviewHours: Number(process.env.SPARK_LOW_REVIEW_WINDOW_HOURS ?? 2),
+      ownerGraceHours: Number(process.env.SPARK_OWNER_GRACE_HOURS ?? 12),
+    };
+  }
+  return {
+    proposalHours: Number(process.env.SPARK_HIGH_PROPOSAL_WINDOW_HOURS ?? 12),
+    reviewHours: Number(process.env.SPARK_HIGH_REVIEW_WINDOW_HOURS ?? 12),
+    ownerGraceHours: Number(process.env.SPARK_OWNER_GRACE_HOURS ?? 12),
+  };
+}
 const labels = (values: string[] | undefined) => [...new Set((values ?? []).map((value) => value.trim().toLowerCase()))];
 const queryTerms = (value: string | undefined) => value?.toLowerCase().split(/\s+/).filter(Boolean) ?? [];
 const actionableBoardTypes = new Set<BoardEntryType>(["PROPOSAL", "QUESTION", "BLOCKER", "HANDOFF", "CHALLENGE"]);
@@ -76,7 +103,70 @@ export class CoordinationEngine {
     };
     this.store.missions.set(mission.id, mission);
     this.record("mission.created", input.creator, mission.id, "MISSION", mission.id, mission);
+    if (input.creator.type === "agent") this.setAgentInterestInternal(mission, input.creator, "JOIN");
     return mission;
+  }
+
+  setAgentInterest(missionId: string, agent: Actor, action: "JOIN" | "LEAVE"): MissionAgentInterest {
+    if (agent.type !== "agent") throw new DomainError("Only agents can opt into agent consensus");
+    const mission = this.mission(missionId);
+    if (mission.status === "ABANDONED") throw new DomainError("Abandoned missions cannot accept agent interest");
+    return this.setAgentInterestInternal(mission, agent, action);
+  }
+
+  agentInterestView(missionId: string, agentId?: string): {
+    missionId: string;
+    interestedAgentCount: number;
+    optedIn: boolean;
+  } {
+    this.mission(missionId);
+    const interests = [...this.store.agentInterests.values()].filter(
+      (interest) => interest.missionId === missionId && interest.status === "INTERESTED",
+    );
+    return {
+      missionId,
+      interestedAgentCount: interests.length,
+      optedIn: Boolean(agentId && interests.some((interest) => interest.agent.id === agentId)),
+    };
+  }
+
+  private setAgentInterestInternal(
+    mission: Mission,
+    agent: Actor,
+    action: "JOIN" | "LEAVE",
+  ): MissionAgentInterest {
+    const existing = [...this.store.agentInterests.values()].find(
+      (interest) => interest.missionId === mission.id && interest.agent.id === agent.id,
+    );
+    const timestamp = now();
+    if (existing) {
+      existing.status = action === "JOIN" ? "INTERESTED" : "WITHDRAWN";
+      existing.agent = agent;
+      if (action === "JOIN") {
+        existing.optedOutAt = undefined;
+      } else {
+        existing.optedOutAt = timestamp;
+      }
+      this.record(action === "JOIN" ? "agent_interest.joined" : "agent_interest.left", agent, mission.id, "MISSION_AGENT_INTEREST", existing.id, existing);
+      return existing;
+    }
+    const interest: MissionAgentInterest = {
+      id: randomUUID(),
+      missionId: mission.id,
+      agent,
+      status: action === "JOIN" ? "INTERESTED" : "WITHDRAWN",
+      optedInAt: timestamp,
+      ...(action === "LEAVE" ? { optedOutAt: timestamp } : {}),
+    };
+    this.store.agentInterests.set(interest.id, interest);
+    this.record(action === "JOIN" ? "agent_interest.joined" : "agent_interest.left", agent, mission.id, "MISSION_AGENT_INTEREST", interest.id, interest);
+    return interest;
+  }
+
+  private interestedAgentCount(missionId: string): number {
+    return [...this.store.agentInterests.values()].filter(
+      (interest) => interest.missionId === missionId && interest.status === "INTERESTED",
+    ).length;
   }
 
   grantDelegation(input: {
@@ -149,12 +239,12 @@ export class CoordinationEngine {
       level: "MISSION",
       title: `Initial plan: ${mission.title}`,
       question: `Which plan should be used to start mission "${mission.title}"?`,
-      risk: "HIGH",
+      risk: "LOW",
       proposalHours: 0,
       reviewHours: 0,
       ownerGraceHours: 168,
       minIndependentBallots: 1,
-      autoSelect: false,
+      autoSelect: true,
     });
 
     const proposal = this.createDecisionProposalInternal(gate, {
@@ -177,7 +267,18 @@ export class CoordinationEngine {
     this.store.plans.set(plan.id, plan);
     this.record("plan.proposed", proposedBy, missionId, "PLAN", plan.id, plan);
 
-    // Advance immediately so the gate lands in AWAITING_HUMAN.
+    if (proposedBy.type === "agent") {
+      this.submitDecisionBallot({
+        gateId: gate.id,
+        voter: proposedBy,
+        rankedProposalIds: [proposal.id],
+        rationale: "Initial agent proposal submitted for consensus.",
+        objections: [],
+      });
+      if (gate.status === "SELECTED") plan.status = "APPROVED";
+    }
+
+    // Advance immediately so a one-agent mission can continue without a timer.
     this.advanceDecisionGates(now(), gate.id);
 
     return plan;
@@ -259,21 +360,24 @@ export class CoordinationEngine {
     title: string;
     question: string;
     risk: DecisionGate["risk"];
-    proposalHours: number;
-    reviewHours: number;
-    ownerGraceHours: number;
+    proposalHours?: number | undefined;
+    reviewHours?: number | undefined;
+    ownerGraceHours?: number | undefined;
     minIndependentBallots: number;
     autoSelect: boolean;
     fallbackHumanId?: string | undefined;
     fallbackHumanDisplayName?: string | undefined;
   }): DecisionGate {
     const mission = this.mission(input.missionId);
-    this.assertMissionController(mission, input.actor);
+    this.assertAgentTextLength(input.actor, {
+      title: input.title,
+      question: input.question,
+    }, { title: 120, question: 500 });
     if ((input.fallbackHumanId || input.fallbackHumanDisplayName)
       && !(input.actor.type === "human" && mission.creator.type === "human" && mission.creator.id === input.actor.id)) {
       throw new DomainError("Only the human mission owner can pre-authorize a fallback steward");
     }
-    if (mission.status === "ABANDONED") throw new DomainError("Abandoned missions cannot open decision gates");
+    if (["ABANDONED", "COMPLETED"].includes(mission.status)) throw new DomainError("Reopen the mission before starting another planning thread");
     if (input.taskId) {
       const task = this.task(input.taskId);
       if (task.missionId !== mission.id) throw new DomainError("Task belongs to another mission");
@@ -296,9 +400,16 @@ export class CoordinationEngine {
     if (overlapping) throw new DomainError("This mission scope already has an active decision gate");
 
     const timestamp = now();
-    const proposalClosesAt = new Date(Date.parse(timestamp) + input.proposalHours * 3_600_000).toISOString();
-    const reviewClosesAt = new Date(Date.parse(proposalClosesAt) + input.reviewHours * 3_600_000).toISOString();
-    const ownerDecisionClosesAt = new Date(Date.parse(reviewClosesAt) + input.ownerGraceHours * 3_600_000).toISOString();
+    // Risk-tiered fixed windows keep thread creators from manipulating deadlines.
+    // Override with env vars for local testing (e.g., 0.001 hours = 3.6 seconds).
+    const windows = decisionGateWindows(input.risk);
+    const proposalClosesAt = new Date(Date.parse(timestamp) + windows.proposalHours * 3_600_000).toISOString();
+    const reviewClosesAt = new Date(Date.parse(proposalClosesAt) + windows.reviewHours * 3_600_000).toISOString();
+    const ownerDecisionClosesAt = new Date(
+      Date.parse(reviewClosesAt) + windows.ownerGraceHours * 3_600_000,
+    ).toISOString();
+    if (input.actor.type === "agent") this.setAgentInterestInternal(mission, input.actor, "JOIN");
+    const interestedAgentCount = this.interestedAgentCount(mission.id);
     const gate: DecisionGate = {
       id: randomUUID(),
       missionId: mission.id,
@@ -309,11 +420,14 @@ export class CoordinationEngine {
       question: input.question,
       risk: input.risk,
       status: "PROPOSING",
+      decisionModel: "AGENT_QUORUM",
       createdBy: input.actor,
       proposalClosesAt,
       reviewClosesAt,
       ownerDecisionClosesAt,
       minIndependentBallots: input.minIndependentBallots,
+      interestedAgentCount,
+      requiredApprovals: agentApprovalTarget(interestedAgentCount),
       autoSelect: input.autoSelect,
       ...(input.fallbackHumanId && input.fallbackHumanDisplayName ? {
         fallbackHuman: {
@@ -337,10 +451,17 @@ export class CoordinationEngine {
     title: string;
     summary: string;
     tasks: TaskDraft[];
+    attachments?: Attachment[];
   }): DecisionProposal {
+    if (input.proposedBy.type === "agent") {
+      const mission = this.mission(this.decisionGate(input.gateId).missionId);
+      this.setAgentInterestInternal(mission, input.proposedBy, "JOIN");
+    }
     this.advanceDecisionGates(now(), input.gateId);
     const gate = this.decisionGate(input.gateId);
-    if (gate.status !== "PROPOSING") throw new DomainError("This decision gate is no longer accepting proposals");
+    if (!(["PROPOSING", "REVIEWING"] as DecisionGate["status"][]).includes(gate.status)) {
+      throw new DomainError("This decision gate is no longer accepting proposals");
+    }
     return this.createDecisionProposalInternal(gate, input);
   }
 
@@ -351,8 +472,14 @@ export class CoordinationEngine {
       title: string;
       summary: string;
       tasks: TaskDraft[];
+      attachments?: Attachment[];
     },
   ): DecisionProposal {
+    this.assertAgentTextLength(input.proposedBy, {
+      title: input.title,
+      summary: input.summary,
+    }, { title: 120, summary: 1_000 });
+    this.assertAgentListLength(input.proposedBy, "attachments", input.attachments, 5);
     const duplicate = [...this.store.decisionProposals.values()].some((proposal) =>
       proposal.gateId === gate.id && proposal.proposedBy.id === input.proposedBy.id && proposal.status === "ACTIVE",
     );
@@ -371,10 +498,24 @@ export class CoordinationEngine {
       title: input.title,
       summary: input.summary,
       tasks,
+      attachments: input.attachments ?? [],
       status: "ACTIVE",
       createdAt: now(),
     };
     this.store.decisionProposals.set(proposal.id, proposal);
+    gate.lastProposalAt = proposal.createdAt;
+    gate.updatedAt = proposal.createdAt;
+    if (gate.decisionModel === "AGENT_QUORUM" && !gate.quorumSnapshotAt) {
+      const interestedAgentCount = this.interestedAgentCount(gate.missionId);
+      gate.interestedAgentCount = interestedAgentCount;
+      gate.requiredApprovals = agentApprovalTarget(interestedAgentCount);
+      gate.quorumSnapshotAt = proposal.createdAt;
+      gate.status = "REVIEWING";
+      this.record("decision_gate.quorum_opened", input.proposedBy, gate.missionId, "DECISION_GATE", gate.id, {
+        interestedAgentCount,
+        requiredApprovals: gate.requiredApprovals,
+      });
+    }
     this.record("decision_proposal.submitted", input.proposedBy, gate.missionId, "DECISION_PROPOSAL", proposal.id, proposal);
     return proposal;
   }
@@ -386,15 +527,22 @@ export class CoordinationEngine {
     rationale: string;
     objections: DecisionBallot["objections"];
   }): DecisionBallot {
+    this.assertAgentTextLength(input.voter, { rationale: input.rationale }, { rationale: 500 });
     this.advanceDecisionGates(now(), input.gateId);
     const gate = this.decisionGate(input.gateId);
     if (gate.status !== "REVIEWING") throw new DomainError("This decision gate is not accepting ballots");
+    if (input.voter.type !== "agent") throw new DomainError("Only agents can participate in agent consensus");
+    const interest = [...this.store.agentInterests.values()].find(
+      (candidate) => candidate.missionId === gate.missionId
+        && candidate.agent.id === input.voter.id
+        && candidate.status === "INTERESTED",
+    );
+    if (!interest) throw new DomainError("Opt into this mission before responding to its proposals");
     const proposals = [...this.store.decisionProposals.values()].filter(
       (proposal) => proposal.gateId === gate.id && proposal.status === "ACTIVE",
     );
-    if (proposals.some((proposal) => proposal.proposedBy.id === input.voter.id)) {
-      throw new DomainError("Proposal authors cannot review or vote in their own decision gate");
-    }
+    // Agent consensus counts distinct participating agents. The first agent is
+    // intentionally allowed to approve its own plan so a one-agent mission can start.
     const proposalIds = new Set(proposals.map((proposal) => proposal.id));
     if (input.rankedProposalIds.some((id) => !proposalIds.has(id))) {
       throw new DomainError("A ranked proposal is not active in this decision gate");
@@ -411,7 +559,10 @@ export class CoordinationEngine {
       existing.rationale = input.rationale;
       existing.objections = input.objections;
       existing.updatedAt = timestamp;
+      gate.lastBallotAt = timestamp;
+      gate.updatedAt = timestamp;
       this.record("decision_ballot.updated", input.voter, gate.missionId, "DECISION_BALLOT", existing.id, existing);
+      this.advanceDecisionGates(timestamp, gate.id);
       return existing;
     }
     const ballot: DecisionBallot = {
@@ -426,7 +577,10 @@ export class CoordinationEngine {
       updatedAt: timestamp,
     };
     this.store.decisionBallots.set(ballot.id, ballot);
+    gate.lastBallotAt = timestamp;
+    gate.updatedAt = timestamp;
     this.record("decision_ballot.submitted", input.voter, gate.missionId, "DECISION_BALLOT", ballot.id, ballot);
+    this.advanceDecisionGates(timestamp, gate.id);
     return ballot;
   }
 
@@ -445,6 +599,8 @@ export class CoordinationEngine {
       proposals: [...this.store.decisionProposals.values()].filter((proposal) => proposal.gateId === gate.id),
       ballots: [...this.store.decisionBallots.values()].filter((ballot) => ballot.gateId === gate.id),
       ranking: this.rankDecisionProposals(gate.id),
+      interestedAgentCount: this.interestedAgentCount(gate.missionId),
+      requiredApprovals: gate.requiredApprovals ?? agentApprovalTarget(gate.interestedAgentCount ?? 0),
     };
   }
 
@@ -479,16 +635,92 @@ export class CoordinationEngine {
     return this.decisionGateView(gate.id);
   }
 
+  private canAdvanceProposingEarly(gate: DecisionGate, cutoffMs: number): boolean {
+    if (gate.status !== "PROPOSING" || gate.risk !== "LOW") return false;
+    const proposals = [...this.store.decisionProposals.values()].filter(
+      (proposal) => proposal.gateId === gate.id && proposal.status === "ACTIVE",
+    );
+    const minProposals = Number(process.env.SPARK_MIN_PROPOSALS_FOR_EARLY_REVIEW ?? 1);
+    if (proposals.length < minProposals) return false;
+
+    const quietMinutes = Number(process.env.SPARK_PROPOSAL_QUIET_MINUTES ?? 5);
+    const quietMs = quietMinutes * 60_000;
+    const lastProposalMs = gate.lastProposalAt ? Date.parse(gate.lastProposalAt) : cutoffMs;
+    return cutoffMs - lastProposalMs >= quietMs;
+  }
+
+  private canAutoSelectEarly(gate: DecisionGate, cutoffMs: number): boolean {
+    if (gate.risk !== "LOW" || !gate.autoSelect) return false;
+    const ballots = [...this.store.decisionBallots.values()].filter((ballot) => ballot.gateId === gate.id);
+    if (ballots.length < gate.minIndependentBallots) return false;
+
+    const ranking = this.rankDecisionProposals(gate.id);
+    const top = ranking[0];
+    const runnerUp = ranking[1];
+    if (!top) return false;
+    if (top.blockingObjections > 0) return false;
+
+    const topFirstChoices = top.agentFirstChoices + top.humanFirstChoices;
+    const runnerFirstChoices = runnerUp ? runnerUp.agentFirstChoices + runnerUp.humanFirstChoices : 0;
+    const clearLead = !runnerUp
+      || (top.combinedPoints >= runnerUp.combinedPoints + 2 && topFirstChoices > runnerFirstChoices);
+    if (!clearLead) return false;
+
+    const quietMinutes = Number(process.env.SPARK_QUORUM_QUIET_MINUTES ?? 5);
+    const quietMs = quietMinutes * 60_000;
+    const lastBallotMs = gate.lastBallotAt ? Date.parse(gate.lastBallotAt) : cutoffMs;
+    return cutoffMs - lastBallotMs >= quietMs;
+  }
+
   advanceDecisionGates(asOf = now(), gateId?: string): DecisionGate[] {
     const cutoff = Date.parse(asOf);
     const changed: DecisionGate[] = [];
     const gates = [...this.store.decisionGates.values()].filter((gate) => !gateId || gate.id === gateId);
     for (const gate of gates) {
+      if (gate.decisionModel === "AGENT_QUORUM") {
+        if (["PROPOSING", "REVIEWING"].includes(gate.status)) {
+          const selected = this.advanceAgentQuorum(gate, asOf);
+          if (selected) changed.push(gate);
+        }
+        continue;
+      }
       if (gate.status === "PROPOSING" && Date.parse(gate.proposalClosesAt) <= cutoff) {
         gate.status = "REVIEWING";
         gate.updatedAt = asOf;
         changed.push(gate);
         this.record("decision_gate.review_opened", systemActor, gate.missionId, "DECISION_GATE", gate.id, gate);
+      }
+      // Early advance to reviewing if enough plans are in and proposing has gone quiet.
+      if (
+        gate.status === "PROPOSING"
+        && Date.parse(gate.proposalClosesAt) > cutoff
+        && this.canAdvanceProposingEarly(gate, cutoff)
+      ) {
+        gate.status = "REVIEWING";
+        gate.updatedAt = asOf;
+        changed.push(gate);
+        this.record("decision_gate.review_opened_early", systemActor, gate.missionId, "DECISION_GATE", gate.id, gate);
+      }
+      // Lazy-consensus early stop: close a reviewing LOW-risk gate before its deadline
+      // if a clear leader has quorum support, no blocks, and voting has been quiet.
+      if (
+        gate.status === "REVIEWING"
+        && Date.parse(gate.reviewClosesAt) > cutoff
+        && this.canAutoSelectEarly(gate, cutoff)
+      ) {
+        const ranking = this.rankDecisionProposals(gate.id);
+        const top = ranking[0];
+        if (top) {
+          const ballots = [...this.store.decisionBallots.values()].filter((ballot) => ballot.gateId === gate.id);
+          this.selectDecisionProposalInternal(
+            gate,
+            top.proposal,
+            systemActor,
+            `Auto-selected early after ${ballots.length} independent ballots with a clear lead, no objections, and a quiet quorum period`,
+            asOf,
+          );
+          if (!changed.includes(gate)) changed.push(gate);
+        }
       }
       if (gate.status === "REVIEWING" && Date.parse(gate.reviewClosesAt) <= cutoff) {
         const proposals = [...this.store.decisionProposals.values()].filter(
@@ -556,6 +788,37 @@ export class CoordinationEngine {
       }
     }
     return changed;
+  }
+
+  private advanceAgentQuorum(gate: DecisionGate, timestamp: string): boolean {
+    const proposals = [...this.store.decisionProposals.values()].filter(
+      (proposal) => proposal.gateId === gate.id && proposal.status === "ACTIVE",
+    );
+    if (!proposals.length) return false;
+    const requiredApprovals = gate.requiredApprovals ?? agentApprovalTarget(gate.interestedAgentCount ?? 0);
+    const ballots = [...this.store.decisionBallots.values()].filter(
+      (ballot) => ballot.gateId === gate.id && ballot.voter.type === "agent",
+    );
+    const support = new Map<string, number>();
+    for (const ballot of ballots) {
+      const firstChoice = ballot.rankedProposalIds[0];
+      if (firstChoice) support.set(firstChoice, (support.get(firstChoice) ?? 0) + 1);
+    }
+    const winner = proposals
+      .filter((proposal) => (support.get(proposal.id) ?? 0) >= requiredApprovals)
+      .sort((left, right) => {
+        const difference = (support.get(right.id) ?? 0) - (support.get(left.id) ?? 0);
+        return difference || left.createdAt.localeCompare(right.createdAt);
+      })[0];
+    if (!winner) return false;
+    this.selectDecisionProposalInternal(
+      gate,
+      winner,
+      systemActor,
+      `Selected after ${support.get(winner.id) ?? 0} of ${requiredApprovals} agent approvals`,
+      timestamp,
+    );
+    return true;
   }
 
   claimTask(taskId: string, agent: Actor): Claim {
@@ -711,7 +974,6 @@ export class CoordinationEngine {
       contribution.updatedAt = now();
       this.setTaskStatus(task, "VERIFIED", input.reviewer);
       this.openUnblockedTasks(task.missionId, input.reviewer);
-      this.completeMissionIfReady(task.missionId, input.reviewer);
       this.checkMilestoneCompletion(task.missionId, input.reviewer);
     } else {
       transitions.contribution(contribution.status, "CHANGES_REQUESTED");
@@ -792,7 +1054,10 @@ export class CoordinationEngine {
   }): RepositoryBinding {
     const mission = this.mission(input.missionId);
     this.assertMissionController(mission, input.actor);
-    this.assertNoRepositoryBinding(input.missionId);
+    if ([...this.store.repositoryBindings.values()].some((binding) =>
+      binding.missionId === mission.id && binding.githubRepositoryId === input.githubRepositoryId)) {
+      throw new DomainError("This repository is already linked to the mission");
+    }
     const timestamp = now();
     const binding: RepositoryBinding = {
       id: randomUUID(),
@@ -816,7 +1081,7 @@ export class CoordinationEngine {
       updatedAt: timestamp,
     };
     this.store.repositoryBindings.set(binding.id, binding);
-    mission.repositoryUrl = binding.repositoryUrl;
+    mission.repositoryUrl ??= binding.repositoryUrl;
     mission.updatedAt = timestamp;
     this.record("repository.registered", input.actor, mission.id, "REPOSITORY", binding.id, binding);
     return binding;
@@ -838,7 +1103,10 @@ export class CoordinationEngine {
     if (input.proposedBy.type !== "agent") throw new DomainError("Only agents can propose publication");
     const mission = this.mission(input.missionId);
     this.assertMissionController(mission, input.proposedBy);
-    if (mission.status !== "COMPLETED") throw new DomainError("Mission must be completed before publication");
+    if (!["ACTIVE", "VERIFYING", "COMPLETED"].includes(mission.status)
+      || ![...this.store.tasks.values()].some((task) => task.missionId === mission.id && task.status === "VERIFIED")) {
+      throw new DomainError("Publication requires verified work in an active or completed mission");
+    }
     const repository = [...this.store.repositoryBindings.values()].find(
       (binding) => binding.missionId === mission.id && binding.status === "VERIFIED",
     );
@@ -963,6 +1231,35 @@ export class CoordinationEngine {
     return request;
   }
 
+  missionProgress(missionId: string) {
+    return buildMissionProgress(this.store, this.mission(missionId));
+  }
+
+  completeMission(input: { missionId: string; actor: Actor; reason: string }): Mission {
+    const mission = this.mission(input.missionId);
+    this.assertMissionController(mission, input.actor);
+    if (!input.reason.trim()) throw new DomainError("Explain how the mission goal was reached");
+    if (!["ACTIVE", "VERIFYING"].includes(mission.status) || !this.missionProgress(mission.id).canComplete) {
+      throw new DomainError("Resolve active tasks, planning threads and blocking human requests before completing the goal");
+    }
+    if (mission.status === "ACTIVE") this.setMissionStatus(mission, "VERIFYING", input.actor);
+    mission.completion = { reason: input.reason.trim(), actor: input.actor, completedAt: now() };
+    this.setMissionStatus(mission, "COMPLETED", input.actor);
+    this.record("mission.goal_completed", input.actor, mission.id, "MISSION", mission.id, mission.completion);
+    return mission;
+  }
+
+  reopenMission(input: { missionId: string; actor: Actor; reason: string }): Mission {
+    const mission = this.mission(input.missionId);
+    this.assertMissionController(mission, input.actor);
+    if (mission.status !== "COMPLETED") throw new DomainError("Only completed missions can be reopened");
+    if (!input.reason.trim()) throw new DomainError("Explain why the mission is continuing");
+    mission.completion = undefined;
+    this.setMissionStatus(mission, "ACTIVE", input.actor);
+    this.record("mission.reopened", input.actor, mission.id, "MISSION", mission.id, { reason: input.reason.trim() });
+    return mission;
+  }
+
   abandonMission(input: { missionId: string; abandonedBy: Actor; reason: string }): Mission {
     const mission = this.mission(input.missionId);
     this.assertHumanMissionOwner(mission, input.abandonedBy);
@@ -1005,13 +1302,7 @@ export class CoordinationEngine {
         sourceTaskId: task.id,
       });
     }
-    const missionTasks = [...this.store.tasks.values()].filter((candidate) => candidate.missionId === mission.id);
-    if (missionTasks.length > 0 && missionTasks.every((candidate) => candidate.status === "CANCELLED")) {
-      this.setMissionStatus(mission, "ABANDONED", input.cancelledBy);
-    } else {
-      this.completeMissionIfReady(mission.id, input.cancelledBy);
-      this.checkMilestoneCompletion(mission.id, input.cancelledBy);
-    }
+    this.checkMilestoneCompletion(mission.id, input.cancelledBy);
     return affected;
   }
 
@@ -1029,6 +1320,7 @@ export class CoordinationEngine {
       throw new DomainError("Reject or withdraw the active publication before reopening verified work");
     }
     if (mission.status === "COMPLETED" || mission.status === "VERIFYING") {
+      mission.completion = undefined;
       this.setMissionStatus(mission, "ACTIVE", input.reopenedBy);
     }
     const affected = this.taskAndDependents(task.id).filter((candidate) => candidate.status !== "CANCELLED");
@@ -1090,12 +1382,23 @@ export class CoordinationEngine {
     summary: string;
     details?: string | undefined;
     evidence?: Evidence[] | undefined;
+    attachments?: Attachment[] | undefined;
     references?: BoardReference[] | undefined;
     tags?: string[] | undefined;
     confidence?: BoardEntry["confidence"] | undefined;
     requestedAction?: string | undefined;
     idempotencyKey?: string | undefined;
   }): BoardEntry {
+    this.assertAgentTextLength(input.author, {
+      summary: input.summary,
+      details: input.details,
+      requestedAction: input.requestedAction,
+    }, { summary: 200, details: 1_000, requestedAction: 200 });
+    this.assertAgentListLength(input.author, "tags", input.tags, 5);
+    this.assertAgentListLength(input.author, "attachments", input.attachments, 5);
+    for (const evidence of input.evidence ?? []) {
+      this.assertAgentTextLength(input.author, { evidenceSummary: evidence.summary }, { evidenceSummary: 200 });
+    }
     const mission = this.mission(input.missionId);
     if (mission.status === "ABANDONED") throw new DomainError("Abandoned missions do not accept board entries");
     if (input.type === "DECISION") this.assertHumanMissionOwner(mission, input.author);
@@ -1153,6 +1456,7 @@ export class CoordinationEngine {
       summary: input.summary,
       ...(input.details ? { details: input.details } : {}),
       evidence: input.evidence ?? [],
+      attachments: input.attachments ?? [],
       references,
       tags: labels(input.tags),
       confidence: input.confidence ?? "MEDIUM",
@@ -1350,18 +1654,20 @@ export class CoordinationEngine {
 
   missionView(missionId: string) {
     const mission = this.mission(missionId);
+    const tasks = [...this.store.tasks.values()].filter((task) => task.missionId === missionId);
+    const taskIds = new Set(tasks.map((task) => task.id));
     return {
       mission,
       plans: [...this.store.plans.values()].filter((plan) => plan.missionId === missionId),
       decisionGates: [...this.store.decisionGates.values()].filter((gate) => gate.missionId === missionId),
       decisionProposals: [...this.store.decisionProposals.values()].filter((proposal) => proposal.missionId === missionId),
       decisionBallots: [...this.store.decisionBallots.values()].filter((ballot) => ballot.missionId === missionId),
-      tasks: [...this.store.tasks.values()].filter((task) => task.missionId === missionId),
+      tasks,
       claims: [...this.store.claims.values()].filter((claim) =>
-        [...this.store.tasks.values()].some((task) => task.missionId === missionId && task.id === claim.taskId),
+        taskIds.has(claim.taskId),
       ),
       contributions: [...this.store.contributions.values()].filter((contribution) =>
-        [...this.store.tasks.values()].some((task) => task.missionId === missionId && task.id === contribution.taskId),
+        taskIds.has(contribution.taskId),
       ),
       reviews: [...this.store.reviews.values()].filter((review) => {
         const contribution = this.store.contributions.get(review.contributionId);
@@ -1569,6 +1875,11 @@ export class CoordinationEngine {
       if (candidate.gateId !== gate.id || candidate.status !== "ACTIVE") continue;
       candidate.status = candidate.id === proposal.id ? "SELECTED" : "REJECTED";
     }
+    for (const plan of this.store.plans.values()) {
+      if (plan.decisionGateId === gate.id && plan.status === "PROPOSED") {
+        plan.status = plan.decisionProposalId === proposal.id ? "APPROVED" : "REJECTED";
+      }
+    }
     gate.status = "SELECTED";
     gate.selectedProposalId = proposal.id;
     gate.selectionReason = reason;
@@ -1725,9 +2036,21 @@ export class CoordinationEngine {
     }
   }
 
-  private assertNoRepositoryBinding(missionId: string): void {
-    if ([...this.store.repositoryBindings.values()].some((binding) => binding.missionId === missionId)) {
-      throw new DomainError("Mission already has a repository binding");
+  private assertAgentTextLength(author: Actor, fields: Record<string, string | undefined>, limits: Record<string, number>): void {
+    if (author.type !== "agent") return;
+    for (const [key, value] of Object.entries(fields)) {
+      if (!value) continue;
+      const limit = limits[key];
+      if (limit !== undefined && value.length > limit) {
+        throw new DomainError(`Agent ${key} must be at most ${limit} characters`);
+      }
+    }
+  }
+
+  private assertAgentListLength(author: Actor, name: string, values: unknown[] | undefined, limit: number): void {
+    if (author.type !== "agent") return;
+    if ((values ?? []).length > limit) {
+      throw new DomainError(`Agent ${name} must have at most ${limit} items`);
     }
   }
 
@@ -1821,17 +2144,6 @@ export class CoordinationEngine {
       if (!waitingForHuman && dependencies.every((id) => this.task(id).status === "VERIFIED")) {
         this.setTaskStatus(task, "OPEN", actor);
       }
-    }
-  }
-
-  private completeMissionIfReady(missionId: string, actor: Actor): void {
-    const mission = this.mission(missionId);
-    const tasks = [...this.store.tasks.values()].filter((task) => task.missionId === missionId);
-    const hasVerifiedWork = tasks.some((task) => task.status === "VERIFIED");
-    const allResolved = tasks.every((task) => task.status === "VERIFIED" || task.status === "CANCELLED");
-    if (tasks.length > 0 && hasVerifiedWork && allResolved) {
-      this.setMissionStatus(mission, "VERIFYING", actor);
-      this.setMissionStatus(mission, "COMPLETED", actor);
     }
   }
 

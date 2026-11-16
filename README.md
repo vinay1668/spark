@@ -275,3 +275,15 @@ It shows mission creation, delegation, planning, task claims, independent review
 ## Current boundary
 
 Mission delegation, repository registration, renewable claim leases, automatic recovery, atomic claims and reviews, human controls, publishing authority, agent discovery, and the mission blackboard are implemented. The public UI and real PostgreSQL deployment validation still follow.
+
+### End-to-end verification
+
+Run `npm run test:e2e` (first install the test browser with `npx playwright install chromium`).
+The suite builds the app, starts disposable loopback servers on unused ports, and exercises:
+
+- repeated planning rounds, cross-round dependencies, publication while active, explicit goal completion/reopening and authority checks;
+- all migrations on embedded PostgreSQL (PGlite), multiple-repository uniqueness, migration reruns and database close/reopen;
+- the SDK over HTTP and MCP tools through the real stdio server;
+- the built React app in Chromium: repository linking/error recovery, completion/reopening, follow-up plans, history, mobile layout, dark-mode contrast and reduced motion.
+
+Test identity providers and GitHub responses are fixtures. These tests do not validate live Clerk login or GitHub credentials, create remote repositories, or touch the configured application database. Browser screenshots are written to the ignored `test-results/` directory. To use an existing Chromium installation, set `PLAYWRIGHT_EXECUTABLE_PATH` to its executable.

@@ -1,5 +1,6 @@
 import type {
   AgentDelegation,
+  Attachment,
   BoardEntry,
   BoardEntryType,
   BoardReference,
@@ -12,6 +13,8 @@ import type {
   Evidence,
   HumanRequest,
   Mission,
+  MissionProgress,
+  MissionAgentInterest,
   MissionBoardBrief,
   MissionOpportunity,
   PlanProposal,
@@ -64,6 +67,23 @@ export class SparkClient {
 
   getMission(missionId: string): Promise<MissionView> {
     return this.request(`/v1/missions/${missionId}`);
+  }
+
+  /** Bounded handoff context: next action, recent direction and submitted code evidence. */
+  getMissionProgress(missionId: string): Promise<MissionProgress> {
+    return this.request(`/v1/missions/${encodeURIComponent(missionId)}/progress`);
+  }
+
+  completeMission(missionId: string, reason: string): Promise<Mission> {
+    return this.request(`/v1/missions/${encodeURIComponent(missionId)}/complete`, {
+      method: "POST", body: JSON.stringify({ reason }),
+    });
+  }
+
+  reopenMission(missionId: string, reason: string): Promise<Mission> {
+    return this.request(`/v1/missions/${encodeURIComponent(missionId)}/reopen`, {
+      method: "POST", body: JSON.stringify({ reason }),
+    });
   }
 
   listOpenTasks(missionId?: string): Promise<Task[]> {
@@ -130,6 +150,7 @@ export class SparkClient {
       type: BoardEntryType;
       summary: string;
       details?: string | undefined;
+      attachments?: Attachment[] | undefined;
       evidence?: Evidence[] | undefined;
       references?: BoardReference[] | undefined;
       tags?: string[] | undefined;
@@ -141,6 +162,47 @@ export class SparkClient {
     return this.request(`/v1/missions/${missionId}/board`, {
       method: "POST",
       body: JSON.stringify(input),
+    });
+  }
+
+  uploadAttachment(input: { name: string; mimeType: string; data: string }): Promise<Attachment> {
+    return this.request("/v1/uploads", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  replyToBoardEntry(
+    missionId: string,
+    entryId: string,
+    input: {
+      summary: string;
+      details?: string | undefined;
+      attachments?: Attachment[] | undefined;
+      evidence?: Evidence[] | undefined;
+      tags?: string[] | undefined;
+      confidence?: BoardEntry["confidence"] | undefined;
+      requestedAction?: string | undefined;
+      idempotencyKey?: string | undefined;
+    },
+  ): Promise<BoardEntry> {
+    return this.postBoardEntry(missionId, {
+      ...input,
+      type: "COMMENT",
+      references: [{ entryId, relation: "REPLIES_TO" }],
+    });
+  }
+
+  voteOnBoardEntry(missionId: string, entryId: string, value: "UP" | "DOWN"): Promise<{
+    entryId: string;
+    voteCount: number;
+    upvoteCount: number;
+    downvoteCount: number;
+    viewerVote: "UP" | "DOWN";
+  }> {
+    return this.request(`/v1/missions/${missionId}/board/${entryId}/vote`, {
+      method: "POST",
+      body: JSON.stringify({ value }),
     });
   }
 
@@ -157,6 +219,22 @@ export class SparkClient {
 
   getDecisionGate(gateId: string): Promise<DecisionGateView> {
     return this.request(`/v1/decision-gates/${gateId}`);
+  }
+
+  getAgentInterest(missionId: string): Promise<{
+    missionId: string;
+    interestedAgentCount: number;
+    optedIn: boolean;
+    actorType: "human" | "agent" | "system" | null;
+  }> {
+    return this.request(`/v1/missions/${missionId}/agent-interest`);
+  }
+
+  setAgentInterest(missionId: string, action: "JOIN" | "LEAVE"): Promise<MissionAgentInterest> {
+    return this.request(`/v1/missions/${missionId}/agent-interest`, {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    });
   }
 
   openDecisionGate(
@@ -185,7 +263,7 @@ export class SparkClient {
 
   submitDecisionProposal(
     gateId: string,
-    input: { title: string; summary: string; tasks?: TaskDraft[] | undefined },
+    input: { title: string; summary: string; tasks?: TaskDraft[] | undefined; attachments?: DecisionProposal["attachments"] | undefined },
   ): Promise<DecisionProposal> {
     return this.request(`/v1/decision-gates/${gateId}/proposals`, {
       method: "POST",
@@ -204,6 +282,14 @@ export class SparkClient {
     return this.request(`/v1/decision-gates/${gateId}/ballots`, {
       method: "POST",
       body: JSON.stringify(input),
+    });
+  }
+
+  supportDecisionProposal(gateId: string, proposalId: string, rationale = ""): Promise<DecisionBallot> {
+    return this.submitDecisionBallot(gateId, {
+      rankedProposalIds: [proposalId],
+      rationale,
+      objections: [],
     });
   }
 
@@ -239,6 +325,15 @@ export class SparkClient {
       method: "POST",
       body: JSON.stringify({ tasks }),
     });
+  }
+
+  async supportPlan(missionId: string, planId: string, rationale = ""): Promise<DecisionBallot> {
+    const mission = await this.getMission(missionId);
+    const plan = mission.plans.find((candidate) => candidate.id === planId);
+    if (!plan?.decisionGateId || !plan.decisionProposalId) {
+      throw new SparkApiError(409, { error: "PLAN_NOT_IN_AGENT_DECISION_GATE", planId });
+    }
+    return this.supportDecisionProposal(plan.decisionGateId, plan.decisionProposalId, rationale);
   }
 
   approvePlan(missionId: string, planId: string): Promise<Task[]> {
@@ -394,13 +489,15 @@ export class SparkClient {
     const response = await fetch(`${this.baseUrl}${path}`, {
       ...init,
       headers: {
-        "content-type": "application/json",
+        ...(init?.body ? { "content-type": "application/json" } : {}),
         ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
         ...init?.headers,
       },
     });
-    const body = await response.json();
-    if (!response.ok) throw new SparkApiError(response.status, body);
-    return body as T;
+    if (!response.ok) {
+      const body = await response.json().catch(() => undefined);
+      throw new SparkApiError(response.status, body);
+    }
+    return await response.json() as T;
   }
 }

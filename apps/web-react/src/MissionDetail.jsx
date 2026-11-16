@@ -1,7 +1,17 @@
 import { useEffect, useState } from "react";
 import { Board, post } from "./Board.jsx";
+import { MissionProgress } from "./MissionProgress.jsx";
 import { DecisionEmpty, DecisionPanel } from "./DecisionPanel.jsx";
-import { getActiveIdentity, isAuthenticated } from "./identity.js";
+import { getActiveIdentity, getAuthHeaders, isAuthenticated } from "./identity.js";
+
+async function readAgentInterest(missionId) {
+  const headers = await getAuthHeaders();
+  const response = await fetch(
+    `/api/v1/missions/${encodeURIComponent(missionId)}/agent-interest`,
+    { headers },
+  );
+  return response.ok ? response.json() : null;
+}
 
 const displayStatus = (value) =>
   value
@@ -20,7 +30,12 @@ export function MissionDetail({ missionId }) {
   const [error, setError] = useState("");
   const [claiming, setClaiming] = useState("");
   const [renewing, setRenewing] = useState("");
+  const [interestBusy, setInterestBusy] = useState(false);
   const [identity, setIdentity] = useState(null);
+  const [showHistory, setShowHistory] = useState(false);
+  const [historyLimit, setHistoryLimit] = useState(5);
+  const [showResolved, setShowResolved] = useState(false);
+  const [taskLimit, setTaskLimit] = useState(20);
   useEffect(() => {
     let active = true;
     getActiveIdentity().then((next) => active && setIdentity(next));
@@ -40,6 +55,11 @@ export function MissionDetail({ missionId }) {
       fetch(
         `/api/v1/missions/${encodeURIComponent(missionId)}/decision-gates`,
       ).then((response) => (response.ok ? response.json() : [])),
+      fetch(`/api/v1/missions/${encodeURIComponent(missionId)}/progress`).then((response) => {
+        if (!response.ok) throw new Error("Could not load mission progress.");
+        return response.json();
+      }),
+      readAgentInterest(missionId),
       fetch(`/api/v1/missions/${encodeURIComponent(missionId)}/board/query`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -51,8 +71,8 @@ export function MissionDetail({ missionId }) {
         }),
       }).then((response) => (response.ok ? response.json() : null)),
     ])
-      .then(([nextView, decisionGates, board]) => {
-        if (active) setView({ ...nextView, decisionGates, board });
+      .then(([nextView, decisionGates, progress, agentInterest, board]) => {
+        if (active) setView({ ...nextView, decisionGates, progress, agentInterest, board });
       })
       .catch((reason) => {
         if (active) setError(reason.message);
@@ -104,14 +124,24 @@ export function MissionDetail({ missionId }) {
   const actorId =
     identity?.kind === "account" ? identity.id : `guest:${identity?.id ?? ""}`;
   const isOwner = mission.creator.id === actorId;
+  const archivedGates = view.decisionGates.filter(({ gate }) => ["SELECTED", "PAUSED"].includes(gate.status))
+    .sort((a, b) => b.gate.createdAt.localeCompare(a.gate.createdAt));
+  const activeGates = view.decisionGates.filter(({ gate }) => !["SELECTED", "PAUSED"].includes(gate.status));
+  const openMission = !["COMPLETED", "ABANDONED"].includes(mission.status);
+  const visibleTasks = tasks.filter((task) => showResolved || !["VERIFIED", "CANCELLED"].includes(task.status));
   const refresh = async () => {
-    const [next, gates, board] = await Promise.all([
+    const [next, gates, progress, interest, board] = await Promise.all([
       fetch(`/api/v1/missions/${encodeURIComponent(missionId)}`).then(
         (result) => result.json(),
       ),
       fetch(
         `/api/v1/missions/${encodeURIComponent(missionId)}/decision-gates`,
       ).then((result) => result.json()),
+      fetch(`/api/v1/missions/${encodeURIComponent(missionId)}/progress`).then((response) => {
+        if (!response.ok) throw new Error("Could not load mission progress.");
+        return response.json();
+      }),
+      readAgentInterest(missionId),
       fetch(`/api/v1/missions/${encodeURIComponent(missionId)}/board/query`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -123,7 +153,7 @@ export function MissionDetail({ missionId }) {
         }),
       }).then((result) => result.json()),
     ]);
-    setView({ ...next, decisionGates: gates, board });
+    setView({ ...next, decisionGates: gates, progress, agentInterest: interest, board });
   };
   const claim = async (taskId) => {
     if (!(await isAuthenticated())) {
@@ -140,6 +170,15 @@ export function MissionDetail({ missionId }) {
     const response = await post(`/v1/claims/${claimId}/heartbeat`, {});
     if (response.ok) await refresh();
     setRenewing("");
+  };
+  const toggleAgentInterest = async () => {
+    setInterestBusy(true);
+    const response = await post(
+      `/v1/missions/${encodeURIComponent(missionId)}/agent-interest`,
+      { action: view.agentInterest?.optedIn ? "LEAVE" : "JOIN" },
+    );
+    if (response.ok) await refresh();
+    setInterestBusy(false);
   };
   return (
     <section
@@ -201,38 +240,50 @@ export function MissionDetail({ missionId }) {
             </div>
           ))}
         </div>
+        <MissionProgress progress={view.progress} isOwner={isOwner && identity?.kind === "account"} actorId={actorId} onChanged={refresh} />
         <div className="mission-columns">
           <main className="mission-work">
             <section className="mission-section">
               <div className="section-title">
                 <div>
                   <span className="pixel-label">DIRECTION</span>
-                  <h2>Plan the next move</h2>
+                  <h2>Planning threads</h2>
                 </div>
-                <span>{view.decisionGates.length} decisions</span>
+                <span>{view.decisionGates.length} threads</span>
+                {view.agentInterest?.actorType === "agent" && (
+                  <button
+                    className="button compact"
+                    type="button"
+                    onClick={toggleAgentInterest}
+                    disabled={interestBusy}
+                  >
+                    {view.agentInterest.optedIn ? "Leave agent pool" : "Join agent pool"}
+                  </button>
+                )}
               </div>
-              {view.decisionGates.map((gateView) => (
+              {activeGates.map((gateView) => (
                 <DecisionPanel
                   gateView={gateView}
                   onChanged={refresh}
-                  isOwner={isOwner}
+                  mission={mission}
                   actorId={actorId}
+                  canRespond={view.agentInterest?.optedIn === true}
+                  agentInterest={view.agentInterest}
                   key={gateView.gate.id}
                 />
               ))}
-              {!view.decisionGates.length && (
-                <DecisionEmpty
-                  missionId={missionId}
-                  isOwner={isOwner}
-                  hasTasks={
-                    tasks.length > 0 ||
-                    ["ACTIVE", "VERIFYING", "COMPLETED", "ABANDONED"].includes(
-                      mission.status,
-                    )
-                  }
-                  onChanged={refresh}
-                />
-              )}
+              {archivedGates.length > 0 && <details className="mission-history" onToggle={(event) => setShowHistory(event.currentTarget.open)}>
+                <summary>Earlier rounds · {archivedGates.length}</summary>
+                {showHistory && archivedGates.slice(0, historyLimit).map((gateView) => <DecisionPanel
+                  key={gateView.gate.id} gateView={gateView} onChanged={refresh} mission={mission}
+                  actorId={actorId} canRespond={false} />)}
+                {showHistory && archivedGates.length > historyLimit && <button className="button compact" onClick={() => setHistoryLimit((limit) => limit + 5)}>Show older rounds</button>}
+              </details>}
+              {openMission && <details className="mission-history" open={view.decisionGates.length === 0 ? true : undefined}>
+                <summary>+ Start a planning thread</summary>
+                <DecisionEmpty missionId={missionId} onChanged={refresh}
+                  previousGates={archivedGates.filter(({ gate }) => gate.status === "SELECTED").map(({ gate }) => gate)} />
+              </details>}
             </section>
             <section className="mission-section">
               <div className="section-title">
@@ -244,8 +295,17 @@ export function MissionDetail({ missionId }) {
                   {verifiedTasks}/{tasks.length} verified
                 </span>
               </div>
+              {tasks.some((task) => ["VERIFIED", "CANCELLED"].includes(task.status)) && <label className="mission-history-toggle">
+                <input type="checkbox" checked={showResolved} onChange={(event) => { setShowResolved(event.target.checked); setTaskLimit(20); }} /> Show finished work
+              </label>}
               <div className="task-list">
-                {tasks.map((task) => (
+                {visibleTasks.length === 0 && (
+                  <div className="compact-empty">
+                    <strong>{tasks.length ? "This round is clear." : "No tasks open yet."}</strong>
+                    <span>{tasks.length ? "Start another planning round or review finished work." : "Tasks appear here after a plan is selected."}</span>
+                  </div>
+                )}
+                {visibleTasks.slice(0, taskLimit).map((task) => (
                   <article className="mission-task task-expanded" key={task.id}>
                     <div className="task-top">
                       <div>
@@ -335,6 +395,7 @@ export function MissionDetail({ missionId }) {
                 ))}
               </div>
             </section>
+            {visibleTasks.length > taskLimit && <button className="button compact" onClick={() => setTaskLimit((limit) => limit + 20)}>Show more tasks</button>}
             <Board missionId={missionId} tasks={tasks} />
           </main>
           <aside className="mission-sidebar">
@@ -368,7 +429,7 @@ export function MissionDetail({ missionId }) {
             </section>
             <section>
               <span className="pixel-label">OUTPUTS</span>
-              <strong>{publications.length}</strong>
+              <strong>{publications.filter((publication) => publication.status === "PUBLISHED").length}</strong>
               <p>published capabilities</p>
             </section>
           </aside>

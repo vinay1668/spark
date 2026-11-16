@@ -1,0 +1,156 @@
+/* Small, purposeful movement. No animation library or layout-shifting effects. */
+:root {
+  --ease-settle: cubic-bezier(0.22, 1, 0.36, 1);
+  --motion-quick: 160ms;
+  --motion-enter: 440ms;
+}
+
+/* Keep ink legible on warm accents in both palettes. */
+:is(.mission button, .mission-create-link, .guest-continue,
+  .account-panel-name-save, .discovery-filters .button,
+  .create-principles > span, .stage-step.reached span, .task-claim, .board-new),
+.motion-toggle:hover {
+  color: var(--ink-on-warm);
+}
+
+html[data-theme="dark"] .top {
+  background: var(--paper);
+  border-bottom-color: var(--hairline);
+}
+html[data-theme="dark"] .agent-connect {
+  background:
+    radial-gradient(ellipse at 0 0, #25304d 0, transparent 65%),
+    var(--surface);
+  box-shadow: 6px 6px 0 var(--shadow-c);
+}
+html[data-theme="dark"] .agent-connect-code {
+  background: #0d1422;
+  border-color: var(--hairline);
+}
+html[data-theme="dark"] .brand .spark-fox-mark {
+  filter: drop-shadow(0 2px 5px #0006);
+}
+
+.theme-icon {
+  width: 20px;
+  height: 20px;
+  overflow: visible;
+}
+.theme-sun, .theme-moon {
+  transform-origin: center;
+}
+.theme-sun { opacity: 0; transform: rotate(-45deg) scale(0.5); }
+.theme-moon { opacity: 1; transform: rotate(0) scale(1); }
+html[data-theme="dark"] .theme-sun { opacity: 1; transform: rotate(0) scale(1); }
+html[data-theme="dark"] .theme-moon { opacity: 0; transform: rotate(45deg) scale(0.5); }
+
+.top nav a {
+  position: relative;
+}
+.top nav a::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -6px;
+  height: 2px;
+  background: var(--blue);
+  transform: scaleX(0);
+  transform-origin: left;
+}
+.top nav a:is(:hover, :focus-visible)::after { transform: scaleX(1); }
+
+:where(button, a, input, select, textarea, summary):focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 4px;
+}
+.button.loading .pixel-spinner { color: var(--ink); }
+.button.primary.loading .pixel-spinner { color: var(--ink-on-accent); }
+
+@media (prefers-reduced-motion: no-preference) {
+  [data-reveal].is-revealed {
+    animation: spark-arrive var(--motion-enter) var(--ease-settle) backwards;
+    animation-delay: var(--reveal-delay, 0ms);
+  }
+  /* Async content enters once when mounted; typing or voting does not replay it. */
+  .discovery-results > .work-card,
+  .discovery-head,
+  .create-intro,
+  .mission-form,
+  .board-composer,
+  .discovery-filters:not([hidden]) {
+    animation: spark-arrive 320ms var(--ease-settle) backwards;
+  }
+  .discovery-results > .work-card:nth-child(2) { animation-delay: 35ms; }
+  .discovery-results > .work-card:nth-child(3) { animation-delay: 70ms; }
+  .discovery-results > .work-card:nth-child(4) { animation-delay: 105ms; }
+  .mission-form { animation-delay: 70ms; }
+
+  dialog[open] {
+    animation: spark-dialog-in 240ms var(--ease-settle);
+  }
+  dialog[open]::backdrop {
+    animation: spark-backdrop-in 180ms ease-out;
+  }
+  .theme-sun, .theme-moon {
+    transition: opacity 180ms ease, transform 320ms var(--ease-settle);
+  }
+  :is(.world, .top, .agent-connect, .agent-connect-panel, .work-card,
+    .board-entry, .mission-form, .theme-toggle, input, select, textarea) {
+    transition: background-color 220ms ease, border-color 220ms ease, color 220ms ease;
+  }
+  :is(.button, .top-cta, .mission-create-link, .agent-connect-code-head button) {
+    transition: transform var(--motion-quick) var(--ease-settle),
+      box-shadow var(--motion-quick) ease, background-color var(--motion-quick) ease;
+  }
+  .work-card-link {
+    transition: transform 200ms var(--ease-settle), border-color 180ms ease,
+      box-shadow 180ms ease, background-color 220ms ease;
+  }
+  .top nav a::after { transition: transform 180ms var(--ease-settle); }
+  .step em { display: inline-block; transition: transform 200ms var(--ease-settle); }
+  .board-vote { transition: transform 120ms ease, background-color 120ms ease, color 120ms ease; }
+  .board-vote:active:not(:disabled) { transform: translateY(2px); }
+  .stage-track::after { transition: width 400ms var(--ease-settle); }
+}
+
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  :is(.button, .top-cta, .mission-create-link):hover:not(:disabled):not(.loading) {
+    transform: translate(-1px, -2px);
+    box-shadow: 5px 6px 0 var(--line);
+  }
+  :is(.button, .top-cta, .mission-create-link):active:not(:disabled):not(.loading) {
+    transform: translate(2px, 2px);
+    box-shadow: 1px 1px 0 var(--line);
+  }
+  .work-card-link:hover {
+    transform: translateY(-3px);
+    border-color: var(--blue);
+    box-shadow: 4px 7px 0 var(--line);
+  }
+  .agent-connect-code-head button:hover { transform: translateY(-1px); }
+  .agent-connect-code-head button:active { transform: translateY(1px); }
+  .step:hover em { transform: translateX(4px); }
+}
+
+@keyframes spark-arrive {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes spark-dialog-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes spark-backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Includes existing fox, loading, and log effects. Content and status remain visible. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}

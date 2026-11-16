@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getAuthHeaders } from "./identity.js";
 
 const splitValues = (value) =>
@@ -32,8 +32,12 @@ export function Discovery() {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const pending = useRef(null);
 
   const load = useCallback(async () => {
+    pending.current?.abort();
+    const controller = new AbortController();
+    pending.current = controller;
     setLoading(true);
     setError("");
     const body = {
@@ -49,6 +53,7 @@ export function Discovery() {
     }
     try {
       const response = await fetch(`/api/v1/discovery/${view}`, {
+        signal: controller.signal,
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -58,18 +63,24 @@ export function Discovery() {
       });
       if (!response.ok)
         throw new Error(`Spark API returned ${response.status}`);
-      setItems((await response.json()) ?? []);
+      const nextItems = (await response.json()) ?? [];
+      if (!controller.signal.aborted) setItems(nextItems);
     } catch (reason) {
+      if (controller.signal.aborted) return;
       setError(reason.message);
       setItems([]);
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, [capabilities, mode, onlyEligible, query, status, tags, view]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    const timer = setTimeout(load, query.trim() ? 180 : 0);
+    return () => {
+      clearTimeout(timer);
+      pending.current?.abort();
+    };
+  }, [load, query]);
   const label =
     view === "missions"
       ? "mission"
@@ -255,40 +266,39 @@ function DiscoveryCard({ item, view }) {
   if (view === "missions") {
     const mission = item.mission;
     return (
-      <article className="work-card">
-        <div className="card-kicker">
-          <span className={`status-dot ${mission.status.toLowerCase()}`} />
-          {displayStatus(mission.status)}
-          <span className="card-time">
-            {timeAgo(mission.updatedAt ?? mission.createdAt)}
-          </span>
-        </div>
-        <h3>{mission.title}</h3>
-        <p>{mission.description}</p>
-        <div className="card-footer">
-          <div className="tags">
-            {mission.tags?.length ? (
-              mission.tags.slice(0, 4).map((tag) => (
-                <span className="tag" key={tag}>
-                  {tag}
-                </span>
-              ))
-            ) : (
-              <span className="tag muted-tag">untagged</span>
-            )}
+      <a
+        className="work-card work-card-link"
+        href={`#mission/${encodeURIComponent(mission.id)}`}
+        aria-label={`Open ${mission.title}`}
+      >
+        <article>
+          <div className="card-kicker">
+            <span className={`status-dot ${mission.status.toLowerCase()}`} />
+            {displayStatus(mission.status)}
+            <span className="card-time">
+              {timeAgo(mission.updatedAt ?? mission.createdAt)}
+            </span>
           </div>
-          <span className="card-stat">
-            {item.openTaskCount} open task{item.openTaskCount === 1 ? "" : "s"}
-          </span>
-        </div>
-        <a
-          className="card-link"
-          href={`#mission/${encodeURIComponent(mission.id)}`}
-          aria-label={`Open ${mission.title}`}
-        >
-          Open mission ↗
-        </a>
-      </article>
+          <h3>{mission.title}</h3>
+          <p>{mission.description}</p>
+          <div className="card-footer">
+            <div className="tags">
+              {mission.tags?.length ? (
+                mission.tags.slice(0, 4).map((tag) => (
+                  <span className="tag" key={tag}>
+                    {tag}
+                  </span>
+                ))
+              ) : (
+                <span className="tag muted-tag">untagged</span>
+              )}
+            </div>
+            <span className="card-stat">
+              {item.openTaskCount} open task{item.openTaskCount === 1 ? "" : "s"}
+            </span>
+          </div>
+        </article>
+      </a>
     );
   }
   if (view === "tasks") {

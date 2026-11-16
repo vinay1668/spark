@@ -16,6 +16,7 @@ import {
 } from "./auth/authenticator.js";
 import { CoordinationEngine } from "./domain/engine.js";
 import { PostgresPersistence } from "./persistence/postgres.js";
+import { UploadStore } from "./api/uploads.js";
 
 const isProduction = process.env.NODE_ENV === "production";
 const app = Fastify({
@@ -65,7 +66,17 @@ if (persistence) {
 
 let authenticator: Authenticator;
 if (process.env.DATABASE_URL && process.env.CLERK_SECRET_KEY) {
-  authenticator = new ClerkAuthenticator(process.env.DATABASE_URL, process.env.CLERK_SECRET_KEY);
+  const clerk = new ClerkAuthenticator(process.env.DATABASE_URL, process.env.CLERK_SECRET_KEY);
+  const keys = process.env.SPARK_API_KEY_PEPPER
+    ? new PostgresAuthenticator(process.env.DATABASE_URL, process.env.SPARK_API_KEY_PEPPER)
+    : undefined;
+  authenticator = {
+    authenticate: (header) => /^Bearer spk_/.test(header ?? "")
+      ? keys?.authenticate(header) ?? Promise.resolve(null)
+      : clerk.authenticate(header),
+    reserveDisplayName: (id, name) => clerk.reserveDisplayName(id, name),
+    close: async () => { await Promise.all([clerk.close(), keys?.close()]); },
+  };
   app.log.info("Clerk authentication enabled");
 } else if (process.env.DATABASE_URL && process.env.SPARK_API_KEY_PEPPER) {
   authenticator = new PostgresAuthenticator(
@@ -100,6 +111,7 @@ if (process.env.DATABASE_URL && process.env.CLERK_SECRET_KEY) {
   app.log.warn("No authentication configured; mutation requests will be rejected");
 }
 
+const uploads = persistence ? new UploadStore(persistence.db) : undefined;
 registerRoutes(
   app,
   engine,
@@ -107,6 +119,7 @@ registerRoutes(
   persistence
     ? { run: <T>(action: () => T) => persistence.runAtomically(engine.store, action) }
     : undefined,
+  uploads,
 );
 
 let coordinationSweepRunning = false;
@@ -115,11 +128,25 @@ const coordinationSweep = setInterval(async () => {
   coordinationSweepRunning = true;
   try {
     if (persistence) {
-      await persistence.runAtomically(engine.store, () => {
-        engine.expireClaims();
-        engine.expireHumanRequests();
-        engine.advanceDecisionGates();
-      });
+      // Fast path: only acquire the global lock if there is work to do.
+      const nowMs = Date.now();
+      const hasExpiringClaims = [...engine.store.claims.values()].some(
+        (claim) => claim.status === "ACTIVE" && claim.expiresAt && Date.parse(claim.expiresAt) <= nowMs,
+      );
+      const hasExpiringRequests = [...engine.store.humanRequests.values()].some(
+        (request) => request.status === "OPEN" && request.expiresAt && Date.parse(request.expiresAt) <= nowMs,
+      );
+      const hasGateWork = [...engine.store.decisionGates.values()].some((gate) =>
+        gate.decisionModel !== "AGENT_QUORUM"
+        && ["PROPOSING", "REVIEWING", "AWAITING_HUMAN"].includes(gate.status)
+      );
+      if (hasExpiringClaims || hasExpiringRequests || hasGateWork) {
+        await persistence.runAtomically(engine.store, () => {
+          engine.expireClaims();
+          engine.expireHumanRequests();
+          engine.advanceDecisionGates();
+        });
+      }
     } else {
       engine.expireClaims();
       engine.expireHumanRequests();

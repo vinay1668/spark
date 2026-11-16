@@ -1,18 +1,15 @@
 import { useMemo, useState } from "react";
 import { post } from "./Board.jsx";
+import { AttachmentInput } from "./AttachmentInput.jsx";
+import { PixelLoader } from "./PixelLoader.jsx";
 
 const displayStatus = (value) =>
   value
     .replaceAll("_", " ")
     .toLowerCase()
     .replace(/(^|\s)\S/g, (letter) => letter.toUpperCase());
-const deadline = (value) =>
-  new Date(value).toLocaleString([], {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
-const emptyTask = (number) => ({
-  key: `step-${number}`,
+const emptyTask = (number, gateId) => ({
+  key: `round-${gateId}-step-${number}`,
   title: "",
   objective: "",
   criteria: "",
@@ -26,56 +23,81 @@ const split = (value) =>
     .map((part) => part.trim())
     .filter(Boolean);
 
-export function DecisionPanel({
-  gateView,
-  onChanged,
-  isOwner = false,
-  actorId,
-}) {
-  const { gate, proposals = [], ballots = [], ranking = [] } = gateView;
+function ThreadAuthor({ actor }) {
+  if (!actor) return null;
+  return (
+    <span className="decision-author">
+      <span>Created by</span>
+      <strong>{actor.displayName}</strong>
+      {actor.id?.startsWith("clerk:") && (
+        <span className="verified-badge" title="Verified identity" />
+      )}
+    </span>
+  );
+}
+
+export function DecisionPanel({ gateView, onChanged, mission, actorId, canRespond = false }) {
+  const { gate, proposals = [], ballots = [] } = gateView;
+  const isOwner = mission.creator.id === actorId;
+
   const [title, setTitle] = useState("");
   const [summary, setSummary] = useState("");
-  const [rationale, setRationale] = useState("");
-  const [choices, setChoices] = useState(["", "", ""]);
-  const [tasks, setTasks] = useState([emptyTask(1)]);
-  const [selecting, setSelecting] = useState(null);
+  const [tasks, setTasks] = useState([emptyTask(1, gate.id)]);
+  const [attachments, setAttachments] = useState([]);
+  const [blockId, setBlockId] = useState(null);
+  const [blockReason, setBlockReason] = useState("");
   const [selectionReason, setSelectionReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
 
-  const ranked = useMemo(() => {
-    const byId = new Map(
-      ranking.map((entry, index) => [
-        entry.proposal.id,
-        { ...entry, rank: index + 1 },
-      ]),
-    );
-    return proposals.map(
-      (proposal, index) =>
-        byId.get(proposal.id) ?? {
-          proposal,
-          rank: index + 1,
-          agentPoints: 0,
-          humanPoints: 0,
-          blockingObjections: 0,
-        },
-    );
-  }, [proposals, ranking]);
+  const myBallot = useMemo(
+    () => ballots.find((ballot) => ballot.voter.id === actorId),
+    [ballots, actorId],
+  );
+  const supportingId = myBallot?.rankedProposalIds[0] ?? null;
+  const myBlocks = useMemo(() => {
+    const map = new Map();
+    for (const objection of myBallot?.objections ?? []) {
+      map.set(objection.proposalId, objection.reason);
+    }
+    return map;
+  }, [myBallot]);
+
+  const scoredProposals = useMemo(() => {
+    const support = new Map();
+    const blocks = new Map();
+    for (const ballot of ballots) {
+      const first = ballot.rankedProposalIds[0];
+      if (first) support.set(first, (support.get(first) ?? 0) + 1);
+      for (const objection of ballot.objections) {
+        blocks.set(objection.proposalId, (blocks.get(objection.proposalId) ?? 0) + 1);
+      }
+    }
+    return proposals.map((proposal) => ({
+      proposal,
+      support: support.get(proposal.id) ?? 0,
+      blocks: blocks.get(proposal.id) ?? 0,
+      score: (support.get(proposal.id) ?? 0) - (blocks.get(proposal.id) ?? 0) * 2,
+      selected: gate.selectedProposalId === proposal.id,
+    }));
+  }, [proposals, ballots, gate.selectedProposalId]);
+
   const alreadyProposed = proposals.some(
     (proposal) => proposal.proposedBy.id === actorId,
   );
-  const alreadyVoted = ballots.some((ballot) => ballot.voter.id === actorId);
 
   const phase =
     gate.status === "PROPOSING"
-      ? `Proposals close ${deadline(gate.proposalClosesAt)}`
+      ? "Agents can suggest plans. Consensus starts as soon as a plan is submitted."
       : gate.status === "REVIEWING"
-        ? `Independent review closes ${deadline(gate.reviewClosesAt)}`
+        ? gateView.interestedAgentCount === 0 && gate.decisionModel === "AGENT_QUORUM"
+          ? "Waiting for an agent to join and approve. Connect an agent through MCP or the SDK."
+          : "Any available opted-in agent can approve when enough agents respond to meet quorum."
         : gate.status === "AWAITING_HUMAN"
-          ? "Review is complete. The owner must choose the path."
+          ? "This is a legacy thread awaiting human approval."
           : gate.status === "SELECTED"
-            ? "The path is selected. Its capsules are now tracked as tasks."
-            : "This decision is paused until the owner returns.";
+            ? "A plan was selected and its capsules are now tasks."
+            : "This thread is paused.";
 
   const submitProposal = async (event) => {
     event.preventDefault();
@@ -100,21 +122,66 @@ export function DecisionPanel({
       title,
       summary,
       tasks: capsules,
+      attachments,
     });
   };
-  const submitBallot = async (event) => {
-    event.preventDefault();
-    const rankedProposalIds = choices.filter(Boolean);
-    if (new Set(rankedProposalIds).size !== rankedProposalIds.length) {
-      setMessage("Choose each proposal only once.");
-      return;
+
+  const submitVote = async (nextSupportingId, nextBlocks) => {
+    const objections = Array.from(nextBlocks.entries()).map(
+      ([proposalId, reason]) => ({ proposalId, reason }),
+    );
+    if (gate.decisionModel === "AGENT_QUORUM") {
+      if (!nextSupportingId && !objections.length) return;
+      return submit(`/v1/decision-gates/${gate.id}/ballots`, {
+        rankedProposalIds: nextSupportingId ? [nextSupportingId] : [],
+        objections,
+      });
     }
+    const rankedProposalIds = [];
+    if (nextSupportingId) rankedProposalIds.push(nextSupportingId);
+    const others = scoredProposals
+      .filter(
+        (entry) =>
+          entry.proposal.id !== nextSupportingId &&
+          !nextBlocks.has(entry.proposal.id),
+      )
+      .sort((a, b) => b.score - a.score)
+      .map((entry) => entry.proposal.id);
+    const blocked = scoredProposals
+      .filter((entry) => nextBlocks.has(entry.proposal.id))
+      .map((entry) => entry.proposal.id);
+    rankedProposalIds.push(...others, ...blocked);
+
     await submit(`/v1/decision-gates/${gate.id}/ballots`, {
-      rankedProposalIds,
-      rationale,
-      objections: [],
+      rankedProposalIds: rankedProposalIds.slice(0, 3),
+      rationale: "",
+      objections,
     });
   };
+
+  const toggleSupport = (proposalId) => {
+    const next = new Map(myBlocks);
+    const nextSupport = supportingId === proposalId ? null : proposalId;
+    if (nextSupport) next.delete(nextSupport);
+    if (nextSupport === null && next.size === 0) return;
+    submitVote(nextSupport, next);
+  };
+
+  const submitBlock = (proposalId) => {
+    if (!blockReason.trim()) return;
+    const next = new Map(myBlocks);
+    next.set(proposalId, blockReason.trim());
+    setBlockId(null);
+    setBlockReason("");
+    submitVote(supportingId === proposalId ? null : supportingId, next);
+  };
+
+  const removeBlock = (proposalId) => {
+    const next = new Map(myBlocks);
+    next.delete(proposalId);
+    submitVote(supportingId, next);
+  };
+
   const selectProposal = async (event, proposalId) => {
     event.preventDefault();
     await submit(`/v1/decision-gates/${gate.id}/select`, {
@@ -122,18 +189,34 @@ export function DecisionPanel({
       reason: selectionReason,
     });
   };
+
   const submit = async (path, body) => {
     setBusy(true);
     setMessage("");
-    const response = await post(path, body);
-    if (response.ok) await onChanged();
-    else
-      setMessage(
-        (await response.json().catch(() => ({}))).message ||
-          "This decision could not be saved.",
-      );
-    setBusy(false);
+    try {
+      const response = await post(path, body);
+      if (response.ok) {
+        if (path.endsWith("/proposals")) {
+          setTitle("");
+          setSummary("");
+          setTasks([emptyTask(1, gate.id)]);
+          setAttachments([]);
+        }
+        await onChanged();
+      } else {
+        const body = await response.json().catch(() => ({}));
+        const issue = body.issues?.[0]?.message;
+        setMessage(
+          body.message || issue || "This planning thread could not be updated.",
+        );
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not connect to Spark.");
+    } finally {
+      setBusy(false);
+    }
   };
+
   const updateTask = (index, field, value) =>
     setTasks((current) =>
       current.map((task, taskIndex) =>
@@ -142,12 +225,13 @@ export function DecisionPanel({
     );
 
   return (
-    <div className="decision-panel">
+    <div className="decision-panel planning-thread">
       <div className="decision-head">
         <div>
           <span className="pixel-label">
-            DECISION GATE · {displayStatus(gate.level)}
+            PLANNING THREAD · {displayStatus(gate.level)}
           </span>
+          <ThreadAuthor actor={gate.createdBy} />
           <h3>{gate.title}</h3>
           <p>{gate.question}</p>
         </div>
@@ -158,18 +242,23 @@ export function DecisionPanel({
       <div className="decision-meta">
         <span>{gate.risk === "LOW" ? "◇ reversible" : "◆ high risk"}</span>
         <span>
-          {proposals.length} proposal{proposals.length === 1 ? "" : "s"}
+          {proposals.length} plan{proposals.length === 1 ? "" : "s"}
         </span>
         <span>
-          {ballots.length} independent review{ballots.length === 1 ? "" : "s"}
+          {gateView.interestedAgentCount ?? gate.interestedAgentCount ?? 0} interested agent{(gateView.interestedAgentCount ?? gate.interestedAgentCount ?? 0) === 1 ? "" : "s"}
+        </span>
+        <span>
+          {gateView.requiredApprovals ?? gate.requiredApprovals ?? 1} approvals needed per plan
         </span>
       </div>
       <p className="decision-phase">{phase}</p>
+
       <div className="decision-proposals">
-        {ranked.length ? (
-          ranked.map((entry) => {
-            const proposal = entry.proposal;
-            const selected = gate.selectedProposalId === proposal.id;
+        {scoredProposals.length ? (
+          scoredProposals.map((entry) => {
+            const { proposal, support, blocks, score, selected } = entry;
+            const iSupport = supportingId === proposal.id;
+            const iBlock = myBlocks.has(proposal.id);
             return (
               <article
                 className={`decision-proposal ${selected ? "selected" : ""}`}
@@ -177,21 +266,31 @@ export function DecisionPanel({
               >
                 <div className="decision-proposal-head">
                   <div>
-                    <span className="proposal-rank">#{entry.rank}</span>
+                    <span className="proposal-rank">
+                      {support - blocks > 0 ? `+${support - blocks}` : score}
+                    </span>
                     <span>{proposal.proposedBy.displayName}</span>
                   </div>
                   <div className="proposal-score">
-                    {entry.agentPoints} agent · {entry.humanPoints} human
-                    {entry.blockingObjections ? (
-                      <span className="objection-count">
-                        {entry.blockingObjections} objection
-                        {entry.blockingObjections === 1 ? "" : "s"}
-                      </span>
-                    ) : null}
+                    {support}/{gateView.requiredApprovals ?? gate.requiredApprovals ?? 1} approvals · {blocks} objection{blocks === 1 ? "" : "s"}
                   </div>
                 </div>
                 <h4>{proposal.title}</h4>
                 <p>{proposal.summary}</p>
+                {proposal.attachments?.length > 0 && (
+                  <div className="proposal-attachments">
+                    {proposal.attachments.map((attachment) => (
+                      <a
+                        key={attachment.id}
+                        href={attachment.url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        📎 {attachment.name}
+                      </a>
+                    ))}
+                  </div>
+                )}
                 {(proposal.tasks ?? []).length ? (
                   <div className="decision-capsules">
                     {proposal.tasks.map((task, index) => (
@@ -209,32 +308,98 @@ export function DecisionPanel({
                       </div>
                     ))}
                   </div>
-                ) : (
-                  <p className="decision-no-capsules">
-                    No task capsules included.
+                ) : null}
+                {selected && (
+                  <div className="selected-mark">✓ Selected plan</div>
+                )}
+
+                {gate.status === "REVIEWING" && canRespond && (
+                    <div className="plan-votes">
+                      <button
+                        type="button"
+                        className={`vote-button support ${iSupport ? "active" : ""}`}
+                        disabled={busy}
+                        onClick={() => toggleSupport(proposal.id)}
+                      >
+                        {iSupport ? "Supported" : "Support"}
+                      </button>
+                      {!iBlock ? (
+                        <button
+                          type="button"
+                          className="vote-button block"
+                          disabled={busy || blockId === proposal.id}
+                          onClick={() => setBlockId(proposal.id)}
+                        >
+                          Block
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="vote-button block active"
+                          disabled={busy}
+                          onClick={() => removeBlock(proposal.id)}
+                        >
+                          Remove block
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                {blockId === proposal.id && (
+                  <form
+                    className="block-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      submitBlock(proposal.id);
+                    }}
+                  >
+                    <label>
+                      <span>Why does this block the plan?</span>
+                      <textarea
+                        value={blockReason}
+                        onChange={(event) => setBlockReason(event.target.value)}
+                        required
+                        rows="2"
+                        placeholder="Be specific. What must change before this plan can proceed?"
+                      />
+                    </label>
+                    <div className="form-actions">
+                      <button
+                        className="button primary"
+                        type="submit"
+                        disabled={busy}
+                      >
+                        Submit block
+                      </button>
+                      <button
+                        type="button"
+                        className="button"
+                        onClick={() => setBlockId(null)}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                {iBlock && (
+                  <p className="block-reason">
+                    You blocked this: {myBlocks.get(proposal.id)}
                   </p>
                 )}
-                {selected && (
-                  <div className="selected-mark">✓ Selected path</div>
-                )}
+
                 {isOwner &&
                   ["AWAITING_HUMAN", "PAUSED"].includes(gate.status) &&
                   proposal.status === "ACTIVE" && (
-                    <details
-                      className="decision-select"
-                      open={selecting === proposal.id}
-                      onToggle={(event) =>
-                        setSelecting(
-                          event.currentTarget.open ? proposal.id : null,
-                        )
-                      }
-                    >
-                      <summary>Choose this proposal</summary>
+                    <details className="decision-select">
+                      <summary>Approve and execute this plan</summary>
                       <form
-                        onSubmit={(event) => selectProposal(event, proposal.id)}
+                        onSubmit={(event) =>
+                          selectProposal(event, proposal.id)
+                        }
                       >
                         <label>
-                          <span>Why this proposal?</span>
+                          <span>Why this plan?</span>
                           <textarea
                             value={selectionReason}
                             onChange={(event) =>
@@ -251,7 +416,7 @@ export function DecisionPanel({
                           disabled={busy}
                           type="submit"
                         >
-                          Select and open tasks ↗
+                          Execute plan ↗
                         </button>
                       </form>
                     </details>
@@ -261,30 +426,29 @@ export function DecisionPanel({
           })
         ) : (
           <div className="compact-empty">
-            <strong>No proposals yet.</strong>
-            <span>
-              Be the first to turn this mission into a buildable path.
-            </span>
+            <strong>No plans suggested yet.</strong>
+            <span>Be the first to outline a path for this thread.</span>
           </div>
         )}
       </div>
-      {gate.status === "PROPOSING" && !alreadyProposed && (
+
+      {["PROPOSING", "REVIEWING"].includes(gate.status) && !alreadyProposed && (
         <details className="decision-action">
-          <summary>+ Propose a path</summary>
-          <form onSubmit={submitProposal}>
+          <summary>+ Suggest a plan</summary>
+          <form id="decision-proposal-form" onSubmit={submitProposal}>
             <label>
-              <span>Proposal title</span>
+              <span>Plan title</span>
               <input
                 value={title}
                 onChange={(event) => setTitle(event.target.value)}
                 minLength="3"
                 maxLength="200"
                 required
-                placeholder="Build a small core, then adapters"
+                placeholder="Short, clear plan name"
               />
             </label>
             <label>
-              <span>Why this path?</span>
+              <span>Plan outline</span>
               <textarea
                 value={summary}
                 onChange={(event) => setSummary(event.target.value)}
@@ -292,9 +456,14 @@ export function DecisionPanel({
                 maxLength="5000"
                 rows="3"
                 required
-                placeholder="Explain the approach, trade-offs, and why it should work."
+                placeholder="What should happen and why? Keep it concise."
               />
             </label>
+            <AttachmentInput
+              attachments={attachments}
+              onChange={setAttachments}
+              disabled={busy}
+            />
             <div className="decision-task-head">
               <div>
                 <strong>Task capsules</strong>
@@ -307,7 +476,7 @@ export function DecisionPanel({
                   tasks.length < 7 &&
                   setTasks((current) => [
                     ...current,
-                    emptyTask(current.length + 1),
+                    emptyTask(Math.max(0, ...current.map((task) => Number(task.key.match(/-step-(\d+)$/)?.[1]) || 0)) + 1, gate.id),
                   ])
                 }
               >
@@ -331,77 +500,24 @@ export function DecisionPanel({
               ))}
             </div>
             <p className="form-status">{message}</p>
-            <button className="button primary" disabled={busy} type="submit">
-              Submit proposal ↗
+            <button
+              className={`button primary ${busy ? "loading" : ""}`}
+              disabled={busy}
+              type="submit"
+            >
+              {busy ? <PixelLoader /> : "Submit plan ↗"}
             </button>
           </form>
         </details>
       )}
       {gate.status === "PROPOSING" && alreadyProposed && (
         <p className="decision-note">
-          You already submitted a proposal to this gate.
+          You already suggested a plan for this thread.
         </p>
       )}
-      {gate.status === "REVIEWING" &&
-        proposals.length > 0 &&
-        !alreadyProposed && (
-          <details className="decision-action">
-            <summary>
-              {alreadyVoted
-                ? "Update your review"
-                : "Review and rank proposals"}
-            </summary>
-            <form onSubmit={submitBallot}>
-              <div className="decision-form-grid">
-                {["1st choice", "2nd choice", "3rd choice"].map(
-                  (label, index) => (
-                    <label key={label}>
-                      <span>{label}</span>
-                      <select
-                        value={choices[index]}
-                        required={index === 0}
-                        onChange={(event) =>
-                          setChoices((current) =>
-                            current.map((choice, choiceIndex) =>
-                              choiceIndex === index
-                                ? event.target.value
-                                : choice,
-                            ),
-                          )
-                        }
-                      >
-                        <option value="">{index ? "None" : "Choose"}</option>
-                        {proposals.map((proposal) => (
-                          <option value={proposal.id} key={proposal.id}>
-                            {proposal.title}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  ),
-                )}
-              </div>
-              <label>
-                <span>Why this ranking?</span>
-                <textarea
-                  value={rationale}
-                  onChange={(event) => setRationale(event.target.value)}
-                  minLength="10"
-                  maxLength="5000"
-                  rows="3"
-                  required
-                />
-              </label>
-              <p className="form-status">{message}</p>
-              <button className="button primary" disabled={busy} type="submit">
-                {alreadyVoted ? "Update review ↗" : "Submit review ↗"}
-              </button>
-            </form>
-          </details>
-        )}
-      {gate.status === "REVIEWING" && alreadyProposed && (
+      {gate.decisionModel === "AGENT_QUORUM" && (
         <p className="decision-note">
-          Proposal authors cannot vote in their own decision gate.
+          The first plan to reach quorum opens its tasks for agents.
         </p>
       )}
       <p className="decision-global-status form-status">{message}</p>
@@ -497,68 +613,66 @@ function TaskDraft({ task, index, update, remove }) {
   );
 }
 
-export function DecisionEmpty({ missionId, isOwner, hasTasks, onChanged }) {
-  const [title, setTitle] = useState("Choose the first build plan");
+export function DecisionEmpty({ missionId, onChanged, previousGates = [] }) {
+  const [title, setTitle] = useState("");
   const [question, setQuestion] = useState("");
   const [risk, setRisk] = useState("LOW");
-  const [proposalHours, setProposalHours] = useState("48");
-  const [reviewHours, setReviewHours] = useState("48");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
-  if (hasTasks) return null;
-  if (!isOwner)
-    return (
-      <div className="decision-empty">
-        <div>
-          <span className="pixel-label">NEXT BLOCK</span>
-          <h3>Planning has not opened yet.</h3>
-          <p>
-            The mission owner opens the first decision gate. Then anyone can
-            propose a path.
-          </p>
-        </div>
-      </div>
-    );
+
+  const [parentGateId, setParentGateId] = useState("");
+
   const submitGate = async (event) => {
     event.preventDefault();
     setBusy(true);
-    const response = await post(`/v1/missions/${missionId}/decision-gates`, {
-      level: "MISSION",
-      title,
-      question,
-      risk,
-      proposalHours: Number(proposalHours),
-      reviewHours: Number(reviewHours),
-      ownerGraceHours: 24,
-      minIndependentBallots: 3,
-      autoSelect: true,
-    });
-    if (response.ok) await onChanged();
-    else
-      setMessage(
-        (await response.json().catch(() => ({}))).message ||
-          "Planning could not be opened.",
-      );
+    setMessage("Starting thread…");
+    try {
+      const response = await post(`/v1/missions/${missionId}/decision-gates`, {
+        level: parentGateId ? "MILESTONE" : "MISSION",
+        ...(parentGateId ? { parentGateId } : {}),
+        title,
+        question,
+        risk,
+        minIndependentBallots: risk === "LOW" ? 1 : 3,
+        autoSelect: true,
+      });
+      if (response.ok) {
+        setTitle("");
+        setQuestion("");
+        setMessage("");
+        await onChanged();
+      } else {
+        const body = await response.json().catch(() => ({}));
+        setMessage(body.message || `Planning thread could not be started (${response.status}).`);
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Network error. Please try again.");
+    }
     setBusy(false);
   };
+
   return (
-    <details className="decision-empty decision-create">
-      <summary>
-        <span>
-          <span className="pixel-label">NEXT BLOCK</span>
-          <strong>Open planning</strong>
-        </span>
-        <span>＋</span>
-      </summary>
-      <form onSubmit={submitGate}>
+    <div className="decision-empty">
+      <span className="pixel-label">NEXT BLOCK</span>
+      <h3>Start the next planning round.</h3>
+      <p>Keep building toward the goal. Earlier plans and work stay in the mission.</p>
+      <form id="decision-gate-form" onSubmit={submitGate}>
+        {previousGates.length > 0 && <label>
+          <span>Continue from</span>
+          <select value={parentGateId} onChange={(event) => setParentGateId(event.target.value)}>
+            <option value="">New direction</option>
+            {previousGates.map((gate) => <option key={gate.id} value={gate.id}>{gate.title}</option>)}
+          </select>
+        </label>}
         <label>
-          <span>Decision title</span>
+          <span>Thread title</span>
           <input
             value={title}
             onChange={(event) => setTitle(event.target.value)}
             minLength="3"
             maxLength="200"
             required
+            placeholder="What do we need to decide?"
           />
         </label>
         <label>
@@ -570,9 +684,13 @@ export function DecisionEmpty({ missionId, isOwner, hasTasks, onChanged }) {
             maxLength="2000"
             rows="3"
             required
-            placeholder="Which implementation path should this mission take?"
+            placeholder="What path should this mission take?"
           />
         </label>
+        <p className="thread-phase-hint">
+          Agents opt into the mission, then any available agents can approve a
+          plan. The required approval count is fixed when the first plan opens.
+        </p>
         <div className="decision-form-grid">
           <label>
             <span>Risk</span>
@@ -580,38 +698,20 @@ export function DecisionEmpty({ missionId, isOwner, hasTasks, onChanged }) {
               value={risk}
               onChange={(event) => setRisk(event.target.value)}
             >
-              <option value="LOW">Low · reversible</option>
-              <option value="HIGH">High · owner must choose</option>
-            </select>
-          </label>
-          <label>
-            <span>Proposals close</span>
-            <select
-              value={proposalHours}
-              onChange={(event) => setProposalHours(event.target.value)}
-            >
-              <option value="24">24 hours</option>
-              <option value="48">48 hours</option>
-              <option value="72">72 hours</option>
-            </select>
-          </label>
-          <label>
-            <span>Review closes</span>
-            <select
-              value={reviewHours}
-              onChange={(event) => setReviewHours(event.target.value)}
-            >
-              <option value="24">24 hours</option>
-              <option value="48">48 hours</option>
-              <option value="72">72 hours</option>
+              <option value="LOW">Low · reversible, agents decide</option>
+              <option value="HIGH">High · larger agent quorum</option>
             </select>
           </label>
         </div>
         <p className="form-status">{message}</p>
-        <button className="button primary" type="submit" disabled={busy}>
-          Open planning ↗
+        <button
+          className={`button primary ${busy ? "loading" : ""}`}
+          type="submit"
+          disabled={busy}
+        >
+          {busy ? <PixelLoader /> : "Start thread ↗"}
         </button>
       </form>
-    </details>
+    </div>
   );
 }

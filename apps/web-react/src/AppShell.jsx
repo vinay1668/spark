@@ -1,21 +1,29 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLegacyVoxelScene } from "./LegacyVoxelScene.jsx";
 import { setupIdentity } from "./identity.js";
+import { SparkPetMark } from "./SparkPetMark.jsx";
+import { useReveal } from "./useReveal.js";
 
 export function AppShell({ children, routeKey }) {
+  const rootRef = useRef(null);
+  useReveal(rootRef, routeKey);
   useLegacyVoxelScene(routeKey);
   const insideApp =
     routeKey === "#missions" ||
     routeKey === "#new-mission" ||
     routeKey?.startsWith("#mission/");
-  const [theme, setTheme] = useState(
-    () =>
-      localStorage.getItem("spark-theme") ||
-      (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"),
-  );
+  const [theme, setTheme] = useState(() => {
+    const fallback = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    try {
+      const saved = localStorage.getItem("spark-theme");
+      return saved === "dark" || saved === "light" ? saved : fallback;
+    } catch {
+      return fallback;
+    }
+  });
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    localStorage.setItem("spark-theme", theme);
+    try { localStorage.setItem("spark-theme", theme); } catch { /* Private storage may be unavailable. */ }
     document
       .querySelector('meta[name="theme-color"]')
       ?.setAttribute("content", theme === "dark" ? "#0e121d" : "#fbf6e8");
@@ -24,112 +32,13 @@ export function AppShell({ children, routeKey }) {
   useEffect(() => setupIdentity(), []);
   return (
     <section
+      ref={rootRef}
       className={`world${insideApp ? " discovery-open" : ""}`}
       aria-label="Spark homepage"
     >
       <header className="top">
         <a className="brand" href="/" aria-label="Spark home">
-          <svg className="spark-mark" viewBox="0 0 32 32" aria-hidden="true">
-            <g className="bot-float">
-              <rect
-                className="bot-shadow"
-                x="8"
-                y="28"
-                width="16"
-                height="2"
-                rx="1"
-              />
-              <rect className="bot-leg" x="10" y="23" width="4" height="6" />
-              <rect
-                className="bot-leg bot-leg-alt"
-                x="18"
-                y="23"
-                width="4"
-                height="6"
-              />
-              <rect
-                className="bot-body"
-                x="8"
-                y="16"
-                width="16"
-                height="9"
-                rx="2"
-              />
-              <rect
-                className="bot-panel"
-                x="11"
-                y="19"
-                width="10"
-                height="4"
-                rx="1"
-              />
-              <rect
-                className="bot-arm"
-                x="5"
-                y="18"
-                width="3"
-                height="6"
-                rx="1"
-              />
-              <rect
-                className="bot-arm bot-arm-right"
-                x="24"
-                y="18"
-                width="3"
-                height="6"
-                rx="1"
-              />
-              <rect
-                className="bot-block"
-                x="27"
-                y="20"
-                width="4"
-                height="4"
-                rx=".5"
-              />
-              <rect
-                className="bot-head"
-                x="7"
-                y="7"
-                width="18"
-                height="11"
-                rx="2"
-              />
-              <rect className="bot-ear" x="5" y="10" width="3" height="5" />
-              <rect
-                className="bot-ear bot-ear-right"
-                x="24"
-                y="10"
-                width="3"
-                height="5"
-              />
-              <rect
-                className="bot-visor"
-                x="10"
-                y="10"
-                width="12"
-                height="5"
-                rx="1"
-              />
-              <rect className="bot-eye" x="12" y="12" width="2" height="2" />
-              <rect
-                className="bot-eye bot-eye-right"
-                x="18"
-                y="12"
-                width="2"
-                height="2"
-              />
-              <rect className="bot-antenna" x="15" y="3" width="2" height="4" />
-              <rect
-                className="bot-signal"
-                x="14"
-                y="1"
-                width="4"
-                height="2"
-                rx="1"
-              />
-            </g>
-          </svg>
+          <SparkPetMark />
           spark
         </a>
         <nav aria-label="Main navigation">
@@ -152,7 +61,12 @@ export function AppShell({ children, routeKey }) {
             setTheme((value) => (value === "dark" ? "light" : "dark"))
           }
         >
-          {theme === "dark" ? "☀" : "☾"}
+          <svg className="theme-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" shapeRendering="crispEdges">
+            <g className="theme-sun" fill="currentColor">
+              <path d="M9 7h6v2h2v6h-2v2H9v-2H7V9h2zM11 1h2v4h-2zM11 19h2v4h-2zM1 11h4v2H1zM19 11h4v2h-4zM4 4h3v3H4zM17 4h3v3h-3zM4 17h3v3H4zM17 17h3v3h-3z" />
+            </g>
+            <path className="theme-moon" fill="currentColor" d="M10 2h4v2h-4v4h2v4h4v2h6v4h-2v2h-4v2H8v-2H4v-4H2V8h2V4h6z" />
+          </svg>
         </button>
         <a className="top-cta" href="#new-mission">
           + Start a mission

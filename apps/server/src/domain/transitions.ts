@@ -8,7 +8,7 @@ import type {
 
 const missionTransitions: Record<MissionStatus, readonly MissionStatus[]> = {
   PROPOSED: ["PLANNING", "ABANDONED"],
-  PLANNING: ["AWAITING_APPROVAL", "ABANDONED"],
+  PLANNING: ["AWAITING_APPROVAL", "ACTIVE", "ABANDONED"],
   AWAITING_APPROVAL: ["PLANNING", "ACTIVE", "ABANDONED"],
   ACTIVE: ["VERIFYING", "ABANDONED"],
   VERIFYING: ["ACTIVE", "COMPLETED", "ABANDONED"],

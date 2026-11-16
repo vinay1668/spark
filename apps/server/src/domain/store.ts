@@ -8,6 +8,7 @@ import type {
   DecisionProposal,
   DomainEvent,
   HumanRequest,
+  MissionAgentInterest,
   Mission,
   PlanProposal,
   Publication,
@@ -27,6 +28,7 @@ export class MemoryStore {
   readonly decisionBallots = new Map<string, DecisionBallot>();
   readonly reviews = new Map<string, Review>();
   readonly humanRequests = new Map<string, HumanRequest>();
+  readonly agentInterests = new Map<string, MissionAgentInterest>();
   readonly delegations = new Map<string, AgentDelegation>();
   readonly repositoryBindings = new Map<string, RepositoryBinding>();
   readonly publications = new Map<string, Publication>();

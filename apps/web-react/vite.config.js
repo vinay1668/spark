@@ -24,6 +24,7 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       proxy: {
+        "/uploads": "http://127.0.0.1:4010",
         "/api": {
           target: "http://127.0.0.1:4010",
           rewrite: (path) => path.replace(/^\/api/, ""),

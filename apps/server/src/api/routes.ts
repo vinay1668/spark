@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { ZodError } from "zod";
 import {
   answerHumanRequestSchema,
+  agentInterestSchema,
   boardVoteSchema,
   approveGuestPlanSchema,
   approvePlanSchema,
@@ -44,6 +45,7 @@ import {
   RepositoryVerificationError,
   verifyPublicGitHubRepository,
 } from "../repositories/github-verifier.js";
+import { UploadStore } from "./uploads.js";
 
 export function registerRoutes(
   app: FastifyInstance,
@@ -52,6 +54,7 @@ export function registerRoutes(
   mutationRunner?: {
     run<T>(action: () => T): Promise<T>;
   },
+  uploads?: UploadStore,
 ): void {
   const actors = new WeakMap<FastifyRequest, Actor>();
 
@@ -121,9 +124,27 @@ export function registerRoutes(
   app.get<{ Params: { missionId: string } }>("/v1/missions/:missionId/decision-gates", async (request) =>
     engine.listDecisionGates(request.params.missionId),
   );
+  app.get<{ Params: { missionId: string } }>("/v1/missions/:missionId/agent-interest", async (request) => {
+    const context = await authenticator.authenticate(request.headers.authorization);
+    return {
+      ...engine.agentInterestView(request.params.missionId, context?.actor.id),
+      actorType: context?.actor.type ?? null,
+    };
+  });
   app.get<{ Params: { gateId: string } }>("/v1/decision-gates/:gateId", async (request) =>
     engine.decisionGateView(request.params.gateId),
   );
+  app.get<{ Params: { missionId: string } }>("/v1/missions/:missionId/progress", async (request) =>
+    engine.missionProgress(request.params.missionId),
+  );
+  for (const action of ["complete", "reopen"] as const) {
+    app.post<{ Params: { missionId: string } }>(`/v1/missions/:missionId/${action}`,
+      { preHandler: requireScope("mission:control") }, async (request) => {
+        const input = humanControlSchema.parse(request.body);
+        const command = { missionId: request.params.missionId, actor: actorFor(request), reason: input.reason };
+        return mutate(() => action === "complete" ? engine.completeMission(command) : engine.reopenMission(command));
+      });
+  }
   app.get("/v1/publications", async () => engine.listPublications());
   app.post("/v1/discovery/tasks", async (request) =>
     engine.discoverTasks(discoverTasksSchema.parse(request.body)),
@@ -172,6 +193,7 @@ export function registerRoutes(
         summary: input.summary,
         details: input.details,
         evidence: input.evidence,
+        attachments: input.attachments,
         references: input.references,
         tags: input.tags,
         confidence: input.confidence,
@@ -225,6 +247,15 @@ export function registerRoutes(
   );
 
   app.post<{ Params: { missionId: string } }>(
+    "/v1/missions/:missionId/agent-interest",
+    { preHandler: requireScope("decision:vote") },
+    async (request) => {
+      const input = agentInterestSchema.parse(request.body);
+      return mutate(() => engine.setAgentInterest(request.params.missionId, actorFor(request), input.action));
+    },
+  );
+
+  app.post<{ Params: { missionId: string } }>(
     "/v1/missions/:missionId/decision-gates",
     { preHandler: requireScope("decision:create") },
     async (request, reply) => {
@@ -271,12 +302,11 @@ export function registerRoutes(
     async (request, reply) => {
       const input = submitGuestDecisionProposalSchema.parse(request.body);
       const proposedBy: Actor = { id: `guest:${input.guestId}`, type: "human", displayName: input.guestDisplayName };
+      const { guestId: _guestId, guestDisplayName: _guestDisplayName, ...proposalInput } = input;
       return reply.code(201).send(await mutate(() => engine.submitDecisionProposal({
         gateId: request.params.gateId,
         proposedBy,
-        title: input.title,
-        summary: input.summary,
-        tasks: input.tasks,
+        ...proposalInput,
       })));
     },
   );
@@ -600,6 +630,58 @@ export function registerRoutes(
         defaultBranch: repository.defaultBranch,
         proofPath: repository.proofPath,
       })));
+    },
+  );
+
+  app.post<{ Body: { name: string; mimeType: string; data: string } }>(
+    "/v1/uploads",
+    { preHandler: requireScope("board:write"), bodyLimit: 12 * 1024 * 1024 },
+    async (request, reply) => {
+      if (!uploads) return reply.code(503).send({ error: "UPLOADS_UNAVAILABLE" });
+      try {
+        const attachment = await uploads.store({
+          name: request.body.name,
+          mimeType: request.body.mimeType,
+          data: request.body.data,
+          actor: actorFor(request),
+        });
+        return reply.code(201).send(attachment);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Upload failed";
+        return reply.code(400).send({ error: "INVALID_UPLOAD", message });
+      }
+    },
+  );
+
+  app.post<{ Body: { guestId: string; guestDisplayName: string; name: string; mimeType: string; data: string } }>(
+    "/v1/guest/uploads",
+    { config: { rateLimit: { max: 10, timeWindow: "1 minute" } }, bodyLimit: 12 * 1024 * 1024 },
+    async (request, reply) => {
+      if (!uploads) return reply.code(503).send({ error: "UPLOADS_UNAVAILABLE" });
+      try {
+        const { guestId, guestDisplayName, name, mimeType, data } = request.body;
+        const actor: Actor = { id: `guest:${guestId}`, type: "human", displayName: guestDisplayName };
+        const attachment = await uploads.store({ name, mimeType, data, actor });
+        return reply.code(201).send(attachment);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Upload failed";
+        return reply.code(400).send({ error: "INVALID_UPLOAD", message });
+      }
+    },
+  );
+
+  app.get<{ Params: { uploadId: string } }>(
+    "/uploads/:uploadId",
+    async (request, reply) => {
+      if (!uploads) return reply.code(503).send({ error: "UPLOADS_UNAVAILABLE" });
+      const file = await uploads.fetch(request.params.uploadId);
+      if (!file) return reply.code(404).send({ error: "NOT_FOUND" });
+      return reply
+        .type(file.mimeType)
+        .header("x-content-type-options", "nosniff")
+        .header("content-security-policy", "sandbox; default-src 'none'")
+        .header("content-disposition", `attachment; filename="${file.filename.replace(/[^a-zA-Z0-9._ -]/g, "_")}"`)
+        .send(file.data);
     },
   );
 }

@@ -141,6 +141,7 @@ export class PostgresAuthenticator implements Authenticator {
 }
 
 export const agentScopes: ReadonlySet<ApiScope> = new Set([
+  "mission:control",
   "mission:create",
   "decision:create",
   "decision:propose",
