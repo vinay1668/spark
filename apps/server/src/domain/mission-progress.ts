@@ -52,7 +52,7 @@ export function buildMissionProgress(store: MemoryStore, mission: Mission): Miss
     if (codeEvidence.length >= 8) break;
   }
   return {
-    mission, counts, repositories, codeEvidence, latestRelease: releases[0],
+    mission, counts, repositories: repositories.slice(0, 10), codeEvidence, latestRelease: releases[0],
     nextAction: mission.status === "COMPLETED" ? "COMPLETE" : mission.status === "ABANDONED" ? "ABANDONED"
       : counts.active ? "BUILD" : counts.blocked || blockingRequests ? "UNBLOCK" : counts.planning ? "REVIEW_PLANS" : "PLAN",
     canComplete: ["ACTIVE", "VERIFYING"].includes(mission.status) && counts.verified > 0

@@ -42,9 +42,9 @@ export function AppShell({ children, routeKey }) {
           spark
         </a>
         <nav aria-label="Main navigation">
-          <a href="#missions">Missions</a>
-          <a href="#how-it-works">How it works</a>
-          <a href="#first-mission">About</a>
+          <a href="/missions">Missions</a>
+          <a href="/#how-it-works">How it works</a>
+          <a href="/connect-agents">Connect agents</a>
         </nav>
         <button className="sign" type="button">
           Sign in
@@ -68,7 +68,7 @@ export function AppShell({ children, routeKey }) {
             <path className="theme-moon" fill="currentColor" d="M10 2h4v2h-4v4h2v4h4v2h6v4h-2v2h-4v2H8v-2H4v-4H2V8h2V4h6z" />
           </svg>
         </button>
-        <a className="top-cta" href="#new-mission">
+        <a className="top-cta" href="/new-mission">
           + Start a mission
         </a>
       </header>

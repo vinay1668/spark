@@ -46,6 +46,8 @@ import {
   verifyPublicGitHubRepository,
 } from "../repositories/github-verifier.js";
 import { UploadStore } from "./uploads.js";
+import { buildAgentWorkBrief } from "../domain/agent-work-brief.js";
+import { boundedView, paginate, pageQuery } from "./pagination.js";
 
 export function registerRoutes(
   app: FastifyInstance,
@@ -99,6 +101,13 @@ export function registerRoutes(
   });
 
   app.get("/health", async () => ({ status: "ok" }));
+  app.get<{ Params: { missionId: string }; Querystring: { after?: string } }>("/v1/missions/:missionId/work-brief",
+    { preHandler: requireScope("task:claim") }, async (request, reply) => {
+      const after = request.query.after;
+      if (after && !Number.isFinite(Date.parse(after))) return reply.code(400).send({ error: "INVALID_INPUT", message: "after must be an ISO timestamp" });
+      const mission = engine.store.missions.get(request.params.missionId) ?? engine.missionView(request.params.missionId).mission;
+      return buildAgentWorkBrief(engine.store, mission, actorFor(request), after ? new Date(after).toISOString() : undefined);
+    });
   app.post<{ Body: { displayName?: string } }>(
     "/v1/identity/display-name",
     { preHandler: requireScope("mission:create") },
@@ -114,16 +123,31 @@ export function registerRoutes(
       return reserved ? { displayName } : reply.code(409).send({ error: "DISPLAY_NAME_TAKEN" });
     },
   );
-  app.get("/v1/missions", async () => engine.listMissions());
-  app.get<{ Querystring: { missionId?: string } }>("/v1/tasks/open", async (request) =>
-    engine.listOpenTasks(request.query.missionId),
-  );
+  const listResponse = (items: unknown[], query: unknown) => {
+    const input = pageQuery.parse(query);
+    const result = paginate(items, input);
+    return input.page === "true" ? result : result.items;
+  };
+  const gatePage = (gateId: string, input: { limit?: number | undefined; cursor?: string | undefined }, actorId?: string) => {
+    const view = engine.decisionGateView(gateId);
+    const ids = new Set(paginate(view.proposals, input).items.map(proposal => proposal.id));
+    return { ...boundedView(view, input), ranking: view.ranking.filter(item => ids.has(item.proposal.id)), viewerBallot: actorId ? view.ballots.find(ballot => ballot.voter.id === actorId) : undefined };
+  };
+  app.get("/v1/missions", async (request) => listResponse(engine.listMissions(), request.query));
+  app.get<{ Querystring: { missionId?: string } }>("/v1/tasks/open", async (request) => listResponse(engine.listOpenTasks(request.query.missionId), request.query));
   app.get<{ Params: { missionId: string } }>("/v1/missions/:missionId", async (request) =>
-    engine.missionView(request.params.missionId),
+    boundedView(engine.missionView(request.params.missionId), pageQuery.parse(request.query)),
   );
-  app.get<{ Params: { missionId: string } }>("/v1/missions/:missionId/decision-gates", async (request) =>
-    engine.listDecisionGates(request.params.missionId),
-  );
+  app.get<{ Params: { missionId: string } }>("/v1/missions/:missionId/decision-gates", async (request) => {
+    const actorId = (await authenticator.authenticate(request.headers.authorization))?.actor.id;
+    const input = pageQuery.parse(request.query);
+    const gates = [...engine.store.decisionGates.values()].filter(gate => gate.missionId === request.params.missionId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id));
+    if (!engine.store.missions.has(request.params.missionId)) engine.missionView(request.params.missionId);
+    const page = paginate(gates, input);
+    const items = page.items.map(gate => gatePage(gate.id, { limit: 20 }, actorId));
+    return input.page === "true" ? { ...page, items } : items;
+  });
   app.get<{ Params: { missionId: string } }>("/v1/missions/:missionId/agent-interest", async (request) => {
     const context = await authenticator.authenticate(request.headers.authorization);
     return {
@@ -131,9 +155,10 @@ export function registerRoutes(
       actorType: context?.actor.type ?? null,
     };
   });
-  app.get<{ Params: { gateId: string } }>("/v1/decision-gates/:gateId", async (request) =>
-    engine.decisionGateView(request.params.gateId),
-  );
+  app.get<{ Params: { gateId: string } }>("/v1/decision-gates/:gateId", async (request) => {
+    const actorId = (await authenticator.authenticate(request.headers.authorization))?.actor.id;
+    return gatePage(request.params.gateId, pageQuery.parse(request.query), actorId);
+  });
   app.get<{ Params: { missionId: string } }>("/v1/missions/:missionId/progress", async (request) =>
     engine.missionProgress(request.params.missionId),
   );
@@ -145,15 +170,25 @@ export function registerRoutes(
         return mutate(() => action === "complete" ? engine.completeMission(command) : engine.reopenMission(command));
       });
   }
-  app.get("/v1/publications", async () => engine.listPublications());
+  app.get("/v1/publications", async (request) => listResponse(engine.listPublications(), request.query));
+  app.get<{ Params: { missionId: string; section: string } }>("/v1/missions/:missionId/records/:section", async (request, reply) => {
+    const view = engine.missionView(request.params.missionId);
+    const collection = view[request.params.section as keyof typeof view];
+    if (!Array.isArray(collection)) return reply.code(400).send({ error: "INVALID_SECTION" });
+    return paginate<unknown>(collection, pageQuery.parse(request.query));
+  });
+  const discoveryResponse = <T>(input: { limit: number; cursor?: string | undefined; page?: boolean | undefined }, read: (limit: number) => T[]) => {
+    const results = read(input.limit + 1);
+    return input.page ? { items: results.slice(0, input.limit), nextCursor: results.length > input.limit ? String(Number(input.cursor ?? 0) + input.limit) : null } : results.slice(0, input.limit);
+  };
   app.post("/v1/discovery/tasks", async (request) =>
-    engine.discoverTasks(discoverTasksSchema.parse(request.body)),
+    (() => { const input = discoverTasksSchema.parse(request.body); return discoveryResponse(input, limit => engine.discoverTasks({ ...input, limit })); })(),
   );
   app.post("/v1/discovery/missions", async (request) =>
-    engine.discoverMissions(discoverMissionsSchema.parse(request.body)),
+    (() => { const input = discoverMissionsSchema.parse(request.body); return discoveryResponse(input, limit => engine.discoverMissions({ ...input, limit })); })(),
   );
   app.post("/v1/discovery/publications", async (request) =>
-    engine.discoverPublications(discoverPublicationsSchema.parse(request.body)),
+    (() => { const input = discoverPublicationsSchema.parse(request.body); return discoveryResponse(input, limit => engine.discoverPublications({ ...input, limit })); })(),
   );
   app.post<{ Params: { missionId: string } }>(
     "/v1/missions/:missionId/board/query",

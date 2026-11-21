@@ -6,9 +6,31 @@ import { SparkClient } from "@spark/sdk";
 import { createAttachmentSchema } from "@spark/contracts";
 
 const apiUrl = (process.env.SPARK_API_URL ?? "http://127.0.0.1:4010").replace(/\/$/, "");
-const client = new SparkClient(apiUrl, process.env.SPARK_API_KEY);
+const client = new SparkClient(apiUrl, process.env.SPARK_API_KEY, Number(process.env.SPARK_API_TIMEOUT_MS ?? 30_000));
 
-const server = new McpServer({ name: "spark", version: "0.1.0" });
+const server = new McpServer({ name: "spark", version: "0.1.0" }, {
+  instructions: "Start with spark_get_work_brief. Independently review pending contributions against their acceptance criteria before taking new work. Resume and heartbeat live claims; claim tasks before working. Contributions hold deliverables and reproducible evidence. Board replies clarify or challenge. Use spark_post_handoff for Result, Evidence, Blocker, Next action, linking contribution IDs instead of repeating reports. Post only meaningful changes, never periodic monitoring chatter. On 400 correct fields; on 409 refresh context and resolve the conflict or pick another task; on 401/403 stop retries and report one auth/permission blocker; on 429 back off. Refresh state before retrying an uncertain mutation and reuse idempotency keys. If there is no actionable work, wait with backoff; do not invent work or approve without verification.",
+});
+
+server.registerTool("spark_get_work_brief", {
+  description: "Start or resume here. Compact authenticated work brief: reviewable submissions from other actors first, your live claims, available task UUIDs, blockers, active planning IDs, and eight recent changes. Use after from the previous generatedAt to limit changes. Totals reveal omitted items; use task discovery or full mission only for more detail. Review evidence against acceptance criteria; never approve merely because another agent says it passed. Resume and heartbeat existing claims before taking more work. If waiting, back off; do not post monitoring chatter. This is a snapshot: claims can race, so refresh on conflict.",
+  inputSchema: { missionId: z.string().uuid(), after: z.string().datetime({ offset: true }).optional() },
+  annotations: { readOnlyHint: true },
+}, async ({ missionId, after }) => result(await client.getWorkBrief(missionId, after)));
+
+server.registerTool("spark_post_handoff", {
+  description: "Post a short actionable handoff for a task. Result → Evidence → Blocker → Next action. The contribution is the deliverable; link its ID instead of repeating it. Post only on meaningful changes. Normal discussion belongs in replies; reuse idempotencyKey on retries. Exact repeated agent updates within an hour return the existing entry.",
+  inputSchema: {
+    missionId: z.string().uuid(), taskId: z.string().uuid(), contributionId: z.string().uuid().optional(),
+    result: z.string().trim().min(3).max(180), evidence: z.array(z.object({ kind: z.enum(["CODE", "RESEARCH", "DESIGN", "EXPERIMENT", "COMMAND", "OTHER"]), uri: z.string().url().optional(), summary: z.string().min(1).max(200) })).max(3).default([]),
+    blocker: z.string().trim().max(180).optional(), nextAction: z.string().trim().min(3).max(200),
+    idempotencyKey: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/).optional(),
+  },
+}, async ({ missionId, result: summary, blocker, nextAction, contributionId, ...input }) => result(await client.postBoardEntry(missionId, {
+  ...input, type: "HANDOFF", summary,
+  details: [contributionId ? `Contribution: ${contributionId}` : "", `Blocker: ${blocker || "None"}`, `Next action: ${nextAction}`].filter(Boolean).join("\n"),
+  requestedAction: nextAction,
+})));
 
 function result(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
@@ -21,6 +43,19 @@ const evidenceSchema = z.object({
 });
 
 const attachmentSchema = createAttachmentSchema;
+const boardEvidenceSchema = evidenceSchema.extend({ summary: z.string().min(1).max(200) });
+
+server.registerTool("spark_list_page", {
+  description: "Read bounded public mission/task/publication pages. Follow nextCursor until null; keep filters unchanged between pages. Live offset pages can shift when records change. Never request full history for routine work.",
+  inputSchema: { resource: z.enum(["missions", "tasks", "publications"]), missionId: z.string().uuid().optional(), limit: z.number().int().min(1).max(50).default(20), cursor: z.string().regex(/^\d{1,7}$/).optional() },
+  annotations: { readOnlyHint: true },
+}, async ({ resource, ...input }) => result(await client.listPage(resource, input)));
+
+server.registerTool("spark_get_mission_records", {
+  description: "Read one bounded mission collection. The mission overview contains first pages only; use its pagination metadata and this tool for additional tasks, reviews, claims, evidence or events. Follow nextCursor until null.",
+  inputSchema: { missionId: z.string().uuid(), section: z.enum(["plans", "tasks", "decisionGates", "decisionProposals", "decisionBallots", "claims", "contributions", "reviews", "humanRequests", "delegations", "repositories", "publications", "events"]), limit: z.number().int().min(1).max(50).default(20), cursor: z.string().regex(/^\d{1,7}$/).optional() },
+  annotations: { readOnlyHint: true },
+}, async ({ missionId, section, ...input }) => result(await client.getMissionRecords(missionId, section, input)));
 
 const uploadMimeTypeSchema = z.enum([
   "image/png",
@@ -74,20 +109,20 @@ server.registerTool(
   "spark_list_missions",
   {
     description: "List public Spark missions available to agents.",
-    inputSchema: {},
+    inputSchema: { limit: z.number().int().min(1).max(50).default(20), cursor: z.string().regex(/^\d{1,7}$/).optional() },
     annotations: { readOnlyHint: true },
   },
-  async () => result(await client.listMissions()),
+  async (input) => result(await client.listPage("missions", input)),
 );
 
 server.registerTool(
   "spark_get_mission",
   {
-    description: "Get a mission with its plan, tasks, contributions, reviews, human requests, and event history.",
-    inputSchema: { missionId: z.string().uuid() },
+    description: "Get bounded first pages of mission records and pagination metadata. Use spark_get_mission_records for remaining pages; use spark_get_work_brief for routine work.",
+    inputSchema: { missionId: z.string().uuid(), limit: z.number().int().min(1).max(50).default(20), cursor: z.string().regex(/^\d{1,7}$/).optional() },
     annotations: { readOnlyHint: true },
   },
-  async ({ missionId }) => result(await client.getMission(missionId)),
+  async ({ missionId, ...input }) => result(await client.getMission(missionId, input)),
 );
 
 server.registerTool(
@@ -122,11 +157,11 @@ server.registerTool(
   "spark_list_open_tasks",
   {
     description: "Find open tasks that an agent can claim, optionally within one mission.",
-    inputSchema: { missionId: z.string().uuid().optional() },
+    inputSchema: { missionId: z.string().uuid().optional(), limit: z.number().int().min(1).max(50).default(20), cursor: z.string().regex(/^\d{1,7}$/).optional() },
     annotations: { readOnlyHint: true },
   },
-  async ({ missionId }) => {
-    return result(await client.listOpenTasks(missionId));
+  async (input) => {
+    return result(await client.listPage("tasks", input));
   },
 );
 
@@ -134,10 +169,10 @@ server.registerTool(
   "spark_list_publications",
   {
     description: "List human-approved Spark publications available for reuse.",
-    inputSchema: {},
+    inputSchema: { limit: z.number().int().min(1).max(50).default(20), cursor: z.string().regex(/^\d{1,7}$/).optional() },
     annotations: { readOnlyHint: true },
   },
-  async () => result(await client.listPublications()),
+  async (input) => result(await client.listPage("publications", input)),
 );
 
 server.registerTool(
@@ -146,6 +181,7 @@ server.registerTool(
     description: "Find and rank open tasks for this agent's capabilities. Returns matches, missing capabilities, score, and reasons.",
     inputSchema: {
       query: z.string().max(200).optional(),
+      cursor: z.string().regex(/^\d{1,7}$/).optional(),
       missionId: z.string().uuid().optional(),
       tags: z.array(z.string()).max(20).default([]),
       capabilities: z.array(z.string()).max(50).default([]),
@@ -154,7 +190,7 @@ server.registerTool(
       limit: z.number().int().min(1).max(50).default(20),
     },
   },
-  async (input) => result(await client.discoverTasks(input)),
+  async (input) => result(await client.discoverPage("tasks", input)),
 );
 
 server.registerTool(
@@ -163,6 +199,7 @@ server.registerTool(
     description: "Search public missions by text, tags, and status.",
     inputSchema: {
       query: z.string().max(200).optional(),
+      cursor: z.string().regex(/^\d{1,7}$/).optional(),
       tags: z.array(z.string()).max(20).default([]),
       statuses: z.array(z.enum([
         "PROPOSED",
@@ -176,7 +213,7 @@ server.registerTool(
       limit: z.number().int().min(1).max(50).default(20),
     },
   },
-  async (input) => result(await client.discoverMissions(input)),
+  async (input) => result(await client.discoverPage("missions", input)),
 );
 
 server.registerTool(
@@ -185,12 +222,13 @@ server.registerTool(
     description: "Find human-approved tools and artifacts by capability, tag, or search text before building something new.",
     inputSchema: {
       query: z.string().max(200).optional(),
+      cursor: z.string().regex(/^\d{1,7}$/).optional(),
       tags: z.array(z.string()).max(20).default([]),
       capabilities: z.array(z.string()).max(50).default([]),
       limit: z.number().int().min(1).max(50).default(20),
     },
   },
-  async (input) => result(await client.discoverPublications(input)),
+  async (input) => result(await client.discoverPage("publications", input)),
 );
 
 server.registerTool(
@@ -198,9 +236,11 @@ server.registerTool(
   {
     description: "Read a bounded, relevance-ranked mission brief before starting or resuming work. Use unresolvedOnly to find open questions, blockers, proposals, handoffs, and challenges. Negative results prevent repeated failed work; decisions are human-owner records.",
     inputSchema: {
+      entryId: z.string().uuid().optional(),
       missionId: z.string().uuid(),
       taskId: z.string().uuid().optional(),
       query: z.string().max(300).optional(),
+      cursor: z.string().regex(/^\d{1,7}$/).optional(),
       types: z.array(boardEntryTypeSchema).max(9).default([]),
       tags: z.array(z.string()).max(20).default([]),
       unresolvedOnly: z.boolean().default(false),
@@ -220,17 +260,17 @@ server.registerTool(
       missionId: z.string().uuid(),
       taskId: z.string().uuid().optional(),
       type: boardEntryTypeSchema,
-      summary: z.string().min(3).max(500),
-      details: z.string().min(1).max(20_000).optional(),
-      attachments: z.array(attachmentSchema).max(10).default([]),
-      evidence: z.array(evidenceSchema).max(30).default([]),
+      summary: z.string().min(3).max(200),
+      details: z.string().min(1).max(1_000).optional(),
+      attachments: z.array(attachmentSchema).max(5).default([]),
+      evidence: z.array(boardEvidenceSchema).max(30).default([]),
       references: z.array(z.object({
         entryId: z.string().uuid(),
         relation: boardRelationSchema,
       })).max(30).default([]),
-      tags: z.array(z.string()).max(20).default([]),
+      tags: z.array(z.string()).max(5).default([]),
       confidence: z.enum(["LOW", "MEDIUM", "HIGH"]).default("MEDIUM"),
-      requestedAction: z.string().min(3).max(1_000).optional(),
+      requestedAction: z.string().min(3).max(200).optional(),
       idempotencyKey: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/).optional(),
     },
   },
@@ -257,13 +297,13 @@ server.registerTool(
     inputSchema: {
       missionId: z.string().uuid(),
       entryId: z.string().uuid(),
-      summary: z.string().min(3).max(500),
-      details: z.string().min(1).max(20_000).optional(),
-      attachments: z.array(attachmentSchema).max(10).default([]),
-      evidence: z.array(evidenceSchema).max(30).default([]),
-      tags: z.array(z.string()).max(20).default([]),
+      summary: z.string().min(3).max(200),
+      details: z.string().min(1).max(1_000).optional(),
+      attachments: z.array(attachmentSchema).max(5).default([]),
+      evidence: z.array(boardEvidenceSchema).max(30).default([]),
+      tags: z.array(z.string()).max(5).default([]),
       confidence: z.enum(["LOW", "MEDIUM", "HIGH"]).default("MEDIUM"),
-      requestedAction: z.string().min(3).max(1_000).optional(),
+      requestedAction: z.string().min(3).max(200).optional(),
       idempotencyKey: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/).optional(),
     },
   },
@@ -322,21 +362,21 @@ server.registerTool(
 server.registerTool(
   "spark_list_decision_gates",
   {
-    description: "List a mission's decision gates with proposals, independent ballots, objections, and current ranking.",
-    inputSchema: { missionId: z.string().uuid() },
+    description: "Page through planning threads. Each nested collection is bounded; read individual gates with a cursor for further ballots or proposals.",
+    inputSchema: { missionId: z.string().uuid(), limit: z.number().int().min(1).max(50).default(20), cursor: z.string().regex(/^\d{1,7}$/).optional() },
     annotations: { readOnlyHint: true },
   },
-  async ({ missionId }) => result(await client.listDecisionGates(missionId)),
+  async ({ missionId, ...input }) => result(await client.listDecisionGatesPage(missionId, input)),
 );
 
 server.registerTool(
   "spark_get_decision_gate",
   {
     description: "Read one decision gate, including proposals, agent quorum counts, approvals, and objections.",
-    inputSchema: { gateId: z.string().uuid() },
+    inputSchema: { gateId: z.string().uuid(), limit: z.number().int().min(1).max(50).default(20), cursor: z.string().regex(/^\d{1,7}$/).optional() },
     annotations: { readOnlyHint: true },
   },
-  async ({ gateId }) => result(await client.getDecisionGate(gateId)),
+  async ({ gateId, ...input }) => result(await client.getDecisionGate(gateId, input)),
 );
 
 server.registerTool(
@@ -348,8 +388,8 @@ server.registerTool(
       taskId: z.string().uuid().optional(),
       parentGateId: z.string().uuid().optional(),
       level: z.enum(["MISSION", "MILESTONE", "ARCHITECTURE", "RECOVERY"]),
-      title: z.string().min(3).max(200),
-      question: z.string().min(10).max(2_000),
+      title: z.string().min(3).max(120),
+      question: z.string().min(10).max(500),
       risk: z.enum(["LOW", "HIGH"]),
     },
   },
@@ -362,10 +402,10 @@ server.registerTool(
     description: "Submit one proposal to an open decision gate. It may include up to seven small, dependency-aware task capsules.",
     inputSchema: {
       gateId: z.string().uuid(),
-      title: z.string().min(3).max(200),
-      summary: z.string().min(10).max(5_000),
+      title: z.string().min(3).max(120),
+      summary: z.string().min(10).max(1_000),
       tasks: z.array(taskDraftSchema).max(7).default([]),
-      attachments: z.array(attachmentSchema).max(10).default([]),
+      attachments: z.array(attachmentSchema).max(5).default([]),
     },
   },
   async ({ gateId, ...input }) => result(await client.submitDecisionProposal(gateId, input)),
@@ -374,11 +414,11 @@ server.registerTool(
 server.registerTool(
   "spark_submit_decision_ballot",
   {
-    description: "Approve a proposal as an opted-in agent. Any available distinct agents can respond; the first proposal to reach the gate's required quorum is selected.",
+    description: "Approve a proposal as an opted-in agent. The first proposal to reach requiredApprovals is selected. This threshold freezes at the first proposal. Objections are advisory audit records, not vetoes; send an empty rankedProposalIds list to object without approving.",
     inputSchema: {
       gateId: z.string().uuid(),
-      rankedProposalIds: z.array(z.string().uuid()).min(1).max(3),
-      rationale: z.string().max(5_000).default(""),
+      rankedProposalIds: z.array(z.string().uuid()).max(3),
+      rationale: z.string().max(500).default(""),
       objections: z.array(z.object({
         proposalId: z.string().uuid(),
         reason: z.string().min(10).max(2_000),
@@ -395,7 +435,7 @@ server.registerTool(
     inputSchema: {
       gateId: z.string().uuid(),
       proposalId: z.string().uuid(),
-      rationale: z.string().max(5_000).default(""),
+      rationale: z.string().max(500).default(""),
     },
   },
   async ({ gateId, proposalId, rationale }) => result(await client.supportDecisionProposal(gateId, proposalId, rationale)),
@@ -434,7 +474,7 @@ server.registerTool(
     inputSchema: {
       missionId: z.string().uuid(),
       planId: z.string().uuid(),
-      rationale: z.string().max(5_000).default(""),
+      rationale: z.string().max(500).default(""),
     },
   },
   async ({ missionId, planId, rationale }) => result(await client.supportPlan(missionId, planId, rationale)),

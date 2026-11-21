@@ -70,33 +70,70 @@ export class PostgresPersistence {
   }
 
   async migrate(): Promise<void> {
-    for (const migration of ["001_initial.sql", "002_board_replies.sql", "003_uploads.sql", "004_agent_quorum.sql", "005_multiple_repositories.sql"]) {
-      const sql = await readFile(new URL(`../../migrations/${migration}`, import.meta.url), "utf8");
+    for (const migration of [
+      "001_initial.sql",
+      "002_board_replies.sql",
+      "003_uploads.sql",
+      "004_agent_quorum.sql",
+      "005_multiple_repositories.sql",
+    ]) {
+      const sql = await readFile(
+        new URL(`../../migrations/${migration}`, import.meta.url),
+        "utf8",
+      );
       await this.pool.query(sql);
     }
   }
 
   async load(store: MemoryStore, client?: PoolClient): Promise<void> {
     const database = client ?? this.pool;
-    const [missions, plans, tasks, claims, contributions, decisionGates, decisionProposals, decisionBallots, reviews, humanRequests, delegations, repositoryBindings, publications, boardEntries, agentInterests, events] =
-      await Promise.all([
-        database.query<DataRow<Mission>>("SELECT data FROM missions"),
-        database.query<DataRow<PlanProposal>>("SELECT data FROM plans"),
-        database.query<DataRow<Task>>("SELECT data FROM tasks"),
-        database.query<DataRow<Claim>>("SELECT data FROM claims"),
-        database.query<DataRow<Contribution>>("SELECT data FROM contributions"),
-        database.query<DataRow<DecisionGate>>("SELECT data FROM decision_gates"),
-        database.query<DataRow<DecisionProposal>>("SELECT data FROM decision_proposals"),
-        database.query<DataRow<DecisionBallot>>("SELECT data FROM decision_ballots"),
-        database.query<DataRow<Review>>("SELECT data FROM reviews"),
-        database.query<DataRow<HumanRequest>>("SELECT data FROM human_requests"),
-        database.query<DataRow<AgentDelegation>>("SELECT data FROM agent_delegations"),
-        database.query<DataRow<RepositoryBinding>>("SELECT data FROM repository_bindings"),
-        database.query<DataRow<Publication>>("SELECT data FROM publications"),
-        database.query<DataRow<BoardEntry>>("SELECT data FROM board_entries"),
-        database.query<DataRow<MissionAgentInterest>>("SELECT data FROM mission_agent_interests"),
-        database.query<DataRow<DomainEvent>>("SELECT data FROM domain_events ORDER BY sequence"),
-      ]);
+    const [
+      missions,
+      plans,
+      tasks,
+      claims,
+      contributions,
+      decisionGates,
+      decisionProposals,
+      decisionBallots,
+      reviews,
+      humanRequests,
+      delegations,
+      repositoryBindings,
+      publications,
+      boardEntries,
+      agentInterests,
+      events,
+    ] = await Promise.all([
+      database.query<DataRow<Mission>>("SELECT data FROM missions"),
+      database.query<DataRow<PlanProposal>>("SELECT data FROM plans"),
+      database.query<DataRow<Task>>("SELECT data FROM tasks"),
+      database.query<DataRow<Claim>>("SELECT data FROM claims"),
+      database.query<DataRow<Contribution>>("SELECT data FROM contributions"),
+      database.query<DataRow<DecisionGate>>("SELECT data FROM decision_gates"),
+      database.query<DataRow<DecisionProposal>>(
+        "SELECT data FROM decision_proposals",
+      ),
+      database.query<DataRow<DecisionBallot>>(
+        "SELECT data FROM decision_ballots",
+      ),
+      database.query<DataRow<Review>>("SELECT data FROM reviews"),
+      database.query<DataRow<HumanRequest>>("SELECT data FROM human_requests"),
+      database.query<DataRow<AgentDelegation>>(
+        "SELECT data FROM agent_delegations",
+      ),
+      database.query<DataRow<RepositoryBinding>>(
+        "SELECT data FROM repository_bindings",
+      ),
+      database.query<DataRow<Publication>>("SELECT data FROM publications"),
+      database.query<DataRow<BoardEntry>>("SELECT data FROM board_entries"),
+      database.query<DataRow<MissionAgentInterest>>(
+        "SELECT data FROM mission_agent_interests",
+      ),
+      database.query<DataRow<DomainEvent>>(
+        "SELECT data FROM domain_events ORDER BY sequence",
+      ),
+    ]);
 
     store.missions.clear();
     store.plans.clear();
@@ -118,27 +155,55 @@ export class PostgresPersistence {
     for (const { data } of plans.rows) store.plans.set(data.id, data);
     for (const { data } of tasks.rows) store.tasks.set(data.id, data);
     for (const { data } of claims.rows) store.claims.set(data.id, data);
-    for (const { data } of contributions.rows) store.contributions.set(data.id, data);
-    for (const { data } of decisionProposals.rows) store.decisionProposals.set(data.id, data);
-    for (const { data } of decisionBallots.rows) store.decisionBallots.set(data.id, data);
+    for (const { data } of contributions.rows)
+      store.contributions.set(data.id, data);
+    for (const { data } of decisionProposals.rows)
+      store.decisionProposals.set(data.id, data);
+    for (const { data } of decisionBallots.rows)
+      store.decisionBallots.set(data.id, data);
     for (const { data } of reviews.rows) store.reviews.set(data.id, data);
-    for (const { data } of humanRequests.rows) store.humanRequests.set(data.id, data);
-    for (const { data } of delegations.rows) store.delegations.set(data.id, data);
-    for (const { data } of repositoryBindings.rows) store.repositoryBindings.set(data.id, data);
-    for (const { data } of publications.rows) store.publications.set(data.id, data);
-    for (const { data } of boardEntries.rows) store.boardEntries.set(data.id, data);
-    for (const { data } of agentInterests.rows) store.agentInterests.set(data.id, data);
+    for (const { data } of humanRequests.rows)
+      store.humanRequests.set(data.id, data);
+    for (const { data } of delegations.rows)
+      store.delegations.set(data.id, data);
+    for (const { data } of repositoryBindings.rows)
+      store.repositoryBindings.set(data.id, data);
+    for (const { data } of publications.rows)
+      store.publications.set(data.id, data);
+    for (const { data } of boardEntries.rows)
+      store.boardEntries.set(data.id, data);
+    for (const { data } of agentInterests.rows)
+      store.agentInterests.set(data.id, data);
     for (const { data } of decisionGates.rows) {
       const interestedAgentCount = [...store.agentInterests.values()].filter(
-        (interest) => interest.missionId === data.missionId && interest.status === "INTERESTED",
+        (interest) =>
+          interest.missionId === data.missionId &&
+          interest.status === "INTERESTED",
       ).length;
       store.decisionGates.set(data.id, {
         ...data,
         decisionModel: data.decisionModel ?? "AGENT_QUORUM",
         interestedAgentCount: data.interestedAgentCount ?? interestedAgentCount,
-        requiredApprovals: data.requiredApprovals ?? (interestedAgentCount <= 1
-          ? 1
-          : Math.min(5, Math.max(2, Math.ceil(Math.sqrt(interestedAgentCount))))),
+        requiredApprovals:
+          data.requiredApprovals ??
+          (interestedAgentCount <= 1
+            ? 1
+            : Math.min(
+                5,
+                Math.max(2, Math.ceil(Math.sqrt(interestedAgentCount))),
+              )),
+        ...(data.decisionModel === "AGENT_QUORUM"
+          ? {
+              minIndependentBallots:
+                data.requiredApprovals ??
+                (interestedAgentCount <= 1
+                  ? 1
+                  : Math.min(
+                      5,
+                      Math.max(2, Math.ceil(Math.sqrt(interestedAgentCount))),
+                    )),
+            }
+          : {}),
       });
     }
     store.events.push(...events.rows.map(({ data }) => data));
@@ -161,21 +226,23 @@ export class PostgresPersistence {
     // reload and the DB advisory lock. This removes two round-trips per mutation.
     // Multi-process deployments must keep the DB advisory lock.
     const useMemoryLock = process.env.SPARK_PERSISTENCE_MEMORY_LOCK === "true";
-    if (useMemoryLock) {
-      return this.withMemoryLock(async () => {
+    return this.withMemoryLock(async () => {
+      if (useMemoryLock) {
         const client = await this.pool.connect();
+        let before = this.snapshot(store);
         try {
           await client.query("BEGIN");
           if (process.env.SPARK_PERSISTENCE_RELOAD_ON_MUTATION === "true") {
             await this.load(store, client);
           }
-          const before = this.snapshot(store);
+          before = this.snapshot(store);
           const result = action();
           const after = this.snapshot(store);
           await this.writeSnapshotDiff(before, after, client);
           await client.query("COMMIT");
           return result;
         } catch (error) {
+          this.restore(store, before);
           await client.query("ROLLBACK");
           if (process.env.SPARK_PERSISTENCE_RELOAD_ON_MUTATION === "true") {
             await this.load(store);
@@ -184,35 +251,58 @@ export class PostgresPersistence {
         } finally {
           client.release();
         }
-      });
-    }
+      }
 
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock($1, $2)", [8317, 2026]);
-      if (process.env.SPARK_PERSISTENCE_RELOAD_ON_MUTATION === "true") {
+      const client = await this.pool.connect();
+      let before = this.snapshot(store);
+      try {
+        await client.query("BEGIN");
+        await client.query(
+          "SELECT pg_advisory_xact_lock($1, $2)",
+          [8317, 2026],
+        );
+        // The database lock only protects decisions made from current state.
         await this.load(store, client);
+        before = this.snapshot(store);
+        const result = action();
+        const after = this.snapshot(store);
+        await this.writeSnapshotDiff(before, after, client);
+        await client.query("COMMIT");
+        return result;
+      } catch (error) {
+        this.restore(store, before);
+        await client.query("ROLLBACK");
+        if (process.env.SPARK_PERSISTENCE_RELOAD_ON_MUTATION === "true") {
+          await this.load(store);
+        }
+        throw error;
+      } finally {
+        client.release();
       }
-      const before = this.snapshot(store);
-      const result = action();
-      const after = this.snapshot(store);
-      await this.writeSnapshotDiff(before, after, client);
-      await client.query("COMMIT");
-      return result;
-    } catch (error) {
-      await client.query("ROLLBACK");
-      if (process.env.SPARK_PERSISTENCE_RELOAD_ON_MUTATION === "true") {
-        await this.load(store);
+    });
+  }
+
+  private restore(store: MemoryStore, snapshot: StoreSnapshot): void {
+    for (const key of Object.keys(snapshot) as Array<keyof StoreSnapshot>) {
+      if (key === "events") {
+        store.events.splice(0, store.events.length, ...snapshot.events);
+      } else {
+        const target = store[key] as Map<string, { id: string }>;
+        target.clear();
+        for (const item of snapshot[key]) target.set(item.id, item);
       }
-      throw error;
-    } finally {
-      client.release();
     }
   }
 
-  private async writeSnapshot(snapshot: StoreSnapshot, transactionClient?: PoolClient): Promise<void> {
-    await this.writeSnapshotDiff(this.emptySnapshot(), snapshot, transactionClient);
+  private async writeSnapshot(
+    snapshot: StoreSnapshot,
+    transactionClient?: PoolClient,
+  ): Promise<void> {
+    await this.writeSnapshotDiff(
+      this.emptySnapshot(),
+      snapshot,
+      transactionClient,
+    );
   }
 
   private emptySnapshot(): StoreSnapshot {
@@ -241,20 +331,25 @@ export class PostgresPersistence {
     after: StoreSnapshot,
     transactionClient?: PoolClient,
   ): Promise<void> {
-    const client = transactionClient ?? await this.pool.connect();
+    const client = transactionClient ?? (await this.pool.connect());
     const ownsTransaction = !transactionClient;
     try {
       const statements: string[] = ownsTransaction ? ["BEGIN"] : [];
 
-      const byId = <T extends { id: string }>(values: T[]) => new Map(values.map((v) => [v.id, v]));
+      const byId = <T extends { id: string }>(values: T[]) =>
+        new Map(values.map((v) => [v.id, v]));
 
-      const diff = <T extends { id: string }>(prev: T[], next: T[]): { upsert: T[]; remove: string[] } => {
+      const diff = <T extends { id: string }>(
+        prev: T[],
+        next: T[],
+      ): { upsert: T[]; remove: string[] } => {
         const prevById = byId(prev);
         const nextById = byId(next);
         const upsert: T[] = [];
         for (const [id, value] of nextById) {
           const old = prevById.get(id);
-          if (!old || JSON.stringify(old) !== JSON.stringify(value)) upsert.push(value);
+          if (!old || JSON.stringify(old) !== JSON.stringify(value))
+            upsert.push(value);
         }
         const remove: string[] = [];
         for (const id of prevById.keys()) {
@@ -273,7 +368,9 @@ export class PostgresPersistence {
       ) => {
         const { upsert, remove } = diff(prev, next);
         if (remove.length) {
-          statements.push(`DELETE FROM ${table} WHERE id IN (${remove.map((id) => this.sqlLiteral(id)).join(", ")});`);
+          statements.push(
+            `DELETE FROM ${table} WHERE id IN (${remove.map((id) => this.sqlLiteral(id)).join(", ")});`,
+          );
         }
         if (upsert.length) {
           const allColumns = ["id", ...columns, "data"];
@@ -281,25 +378,50 @@ export class PostgresPersistence {
             const row = [value.id, ...values(value), data(value)];
             return `(${row.map((v) => this.sqlLiteral(v)).join(", ")})`;
           });
-          const updates = [...columns, "data"].map((column) => `${column} = EXCLUDED.${column}`).join(", ");
+          const updates = [...columns, "data"]
+            .map((column) => `${column} = EXCLUDED.${column}`)
+            .join(", ");
           statements.push(
             `INSERT INTO ${table} (${allColumns.join(", ")}) VALUES ${valueRows.join(", ")} ON CONFLICT (id) DO UPDATE SET ${updates}, updated_at = now();`,
           );
         }
       };
 
-      pushUpserts("missions", before.missions, after.missions, ["status"], (v) => [v.status]);
-      pushUpserts("plans", before.plans, after.plans, ["mission_id", "status"], (v) => [v.missionId, v.status]);
-      pushUpserts("tasks", before.tasks, after.tasks, ["mission_id", "status"], (v) => [v.missionId, v.status]);
-      pushUpserts("claims", before.claims, after.claims, ["task_id", "status", "expires_at"], (v) => [
-        v.taskId,
-        v.status,
-        v.expiresAt,
-      ]);
-      pushUpserts("contributions", before.contributions, after.contributions, ["task_id", "status"], (v) => [
-        v.taskId,
-        v.status,
-      ]);
+      pushUpserts(
+        "missions",
+        before.missions,
+        after.missions,
+        ["status"],
+        (v) => [v.status],
+      );
+      pushUpserts(
+        "plans",
+        before.plans,
+        after.plans,
+        ["mission_id", "status"],
+        (v) => [v.missionId, v.status],
+      );
+      pushUpserts(
+        "tasks",
+        before.tasks,
+        after.tasks,
+        ["mission_id", "status"],
+        (v) => [v.missionId, v.status],
+      );
+      pushUpserts(
+        "claims",
+        before.claims,
+        after.claims,
+        ["task_id", "status", "expires_at"],
+        (v) => [v.taskId, v.status, v.expiresAt],
+      );
+      pushUpserts(
+        "contributions",
+        before.contributions,
+        after.contributions,
+        ["task_id", "status"],
+        (v) => [v.taskId, v.status],
+      );
       pushUpserts(
         "decision_gates",
         before.decisionGates,
@@ -331,7 +453,9 @@ export class PostgresPersistence {
             value.reviewer.id,
             value.status,
             value,
-          ].map((v) => this.sqlLiteral(v)).join(", ")}) ON CONFLICT (id) DO NOTHING;`,
+          ]
+            .map((v) => this.sqlLiteral(v))
+            .join(", ")}) ON CONFLICT (id) DO NOTHING;`,
         );
       }
       if (reviewDiff.remove.length) {
@@ -340,14 +464,20 @@ export class PostgresPersistence {
         );
       }
 
-      pushUpserts("human_requests", before.humanRequests, after.humanRequests, ["mission_id", "status"], (v) => [
-        v.missionId,
-        v.status,
-      ]);
-      pushUpserts("agent_delegations", before.delegations, after.delegations, ["mission_id", "status"], (v) => [
-        v.missionId,
-        v.status,
-      ]);
+      pushUpserts(
+        "human_requests",
+        before.humanRequests,
+        after.humanRequests,
+        ["mission_id", "status"],
+        (v) => [v.missionId, v.status],
+      );
+      pushUpserts(
+        "agent_delegations",
+        before.delegations,
+        after.delegations,
+        ["mission_id", "status"],
+        (v) => [v.missionId, v.status],
+      );
       pushUpserts(
         "repository_bindings",
         before.repositoryBindings,
@@ -367,7 +497,13 @@ export class PostgresPersistence {
         before.boardEntries,
         after.boardEntries,
         ["mission_id", "task_id", "entry_type", "author_id", "created_at"],
-        (v) => [v.missionId, v.taskId ?? null, v.type, v.author.id, v.createdAt],
+        (v) => [
+          v.missionId,
+          v.taskId ?? null,
+          v.type,
+          v.author.id,
+          v.createdAt,
+        ],
       );
       pushUpserts(
         "mission_agent_interests",
@@ -390,7 +526,9 @@ export class PostgresPersistence {
             event.entityId,
             event.occurredAt,
             event,
-          ].map((v) => this.sqlLiteral(v)).join(", ")}) ON CONFLICT (id) DO NOTHING;`,
+          ]
+            .map((v) => this.sqlLiteral(v))
+            .join(", ")}) ON CONFLICT (id) DO NOTHING;`,
         );
       }
 
@@ -400,7 +538,9 @@ export class PostgresPersistence {
       }
     } catch (error) {
       if (ownsTransaction) {
-        try { await client.query("ROLLBACK"); } catch {}
+        try {
+          await client.query("ROLLBACK");
+        } catch {}
       }
       throw error;
     } finally {
@@ -475,7 +615,9 @@ export class PostgresPersistence {
       rowPlaceholders.push(`$${base + 2 + row.values.length}::jsonb`);
       valueClauses.push(`(${rowPlaceholders.join(", ")})`);
     }
-    const updates = [...columns, "data"].map((column) => `${column} = EXCLUDED.${column}`).join(", ");
+    const updates = [...columns, "data"]
+      .map((column) => `${column} = EXCLUDED.${column}`)
+      .join(", ");
     await client.query(
       `INSERT INTO ${table} (${allColumns.join(", ")})
        VALUES ${valueClauses.join(", ")}

@@ -208,6 +208,8 @@ export const withdrawPublicationSchema = z.object({
 });
 
 export const discoverTasksSchema = z.object({
+  cursor: z.string().regex(/^\d{1,7}$/).optional(),
+  page: z.boolean().optional(),
   query: z.string().trim().max(200).optional(),
   missionId: z.string().uuid().optional(),
   tags: z.array(labelSchema).max(20).default([]),
@@ -218,6 +220,8 @@ export const discoverTasksSchema = z.object({
 });
 
 export const discoverMissionsSchema = z.object({
+  cursor: z.string().regex(/^\d{1,7}$/).optional(),
+  page: z.boolean().optional(),
   query: z.string().trim().max(200).optional(),
   tags: z.array(labelSchema).max(20).default([]),
   statuses: z.array(z.enum([
@@ -233,6 +237,8 @@ export const discoverMissionsSchema = z.object({
 });
 
 export const discoverPublicationsSchema = z.object({
+  cursor: z.string().regex(/^\d{1,7}$/).optional(),
+  page: z.boolean().optional(),
   query: z.string().trim().max(200).optional(),
   tags: z.array(labelSchema).max(20).default([]),
   capabilities: z.array(labelSchema).max(50).default([]),
@@ -285,6 +291,8 @@ export const createGuestBoardEntrySchema = createBoardEntrySchema.extend({
 });
 
 export const queryMissionBoardSchema = z.object({
+  entryId: z.string().uuid().optional(),
+  cursor: z.string().regex(/^\d{1,7}$/).optional(),
   taskId: z.string().uuid().optional(),
   query: z.string().trim().max(300).optional(),
   types: z.array(boardEntryTypeSchema).max(10).default([]),

@@ -41,10 +41,20 @@ const opened = engine.decisionGateView(gate.id);
 assert(opened.gate.decisionModel === "AGENT_QUORUM", "new gates must use agent quorum");
 assert(opened.interestedAgentCount === 3, "quorum must snapshot all opted-in agents");
 assert(opened.requiredApprovals === 2, "three agents require two approvals");
+assert(opened.gate.minIndependentBallots === opened.requiredApprovals, "legacy threshold must mirror authoritative quorum");
 assert(opened.gate.status === "REVIEWING", "first proposal should open review immediately");
 
 engine.advanceDecisionGates(new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString());
 assert(engine.decisionGate(gate.id).status === "REVIEWING", "future time must not advance an agent gate");
+
+engine.submitDecisionBallot({
+  gateId: gate.id,
+  voter: agentB,
+  rankedProposalIds: [],
+  rationale: "Advisory concern without approval.",
+  objections: [{ proposalId: proposal.id, reason: "Please record the recovery procedure." }],
+});
+assert(engine.decisionGate(gate.id).status === "REVIEWING", "an objection alone must never count as approval");
 
 engine.submitDecisionBallot({
   gateId: gate.id,

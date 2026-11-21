@@ -15,6 +15,11 @@ test('multi-year mission: HTTP + SDK + SQL persistence + MCP', { timeout: 90000 
   const { owner, builder, reviewer, outsider } = h.clients;
   const mission = await owner.createMission({ title: 'Long-running product', description: 'Build a product through many planning rounds and releases.' });
   const id = mission.id;
+  const arrival = await builder.getWorkBrief(id);
+  assert.equal(arrival.mission.id, id);
+  assert.ok(arrival.recentChanges.length <= 8);
+  const anonymousBrief = await fetch(`${h.url}/v1/missions/${id}/work-brief`);
+  assert.equal(anonymousBrief.status, 401);
   await assert.rejects(owner.completeMission(id, 'Not ready yet'), rejects(409));
   await assert.rejects(outsider.completeMission(id, 'Pretend to own it'), rejects(409));
   const anonymous = await fetch(`${h.url}/v1/missions/${id}/complete`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reason: 'Spoof ownership', actor: actors.owner }) });
@@ -101,6 +106,10 @@ test('multi-year mission: HTTP + SDK + SQL persistence + MCP', { timeout: 90000 
       return JSON.parse(result.content[0].text);
     };
     assert.equal((await call('spark_get_mission_progress', { missionId: id })).mission.status, 'COMPLETED');
+    assert.equal((await call('spark_get_work_brief', { missionId: id })).nextAction, 'COMPLETE');
+    const handoff = await call('spark_post_handoff', { missionId: id, taskId: round.task.id, result: 'All round evidence has been reviewed.', nextAction: 'Read the accepted contributions before planning another round.', idempotencyKey: 'lifecycle-final-handoff' });
+    assert.equal(handoff.type, 'HANDOFF');
+    assert.match(handoff.details, /Next action:/);
     assert.equal((await call('spark_reopen_mission', { missionId: id, reason: 'Start another year of improvements.' })).status, 'ACTIVE');
     assert.equal((await call('spark_complete_mission', { missionId: id, reason: 'Confirm the achieved goal again.' })).status, 'COMPLETED');
   } finally { await mcp.close(); }

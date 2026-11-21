@@ -32,9 +32,12 @@ export function Discovery() {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [nextCursor, setNextCursor] = useState(null);
+  const [currentCursor, setCurrentCursor] = useState(null);
   const pending = useRef(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (cursor = null) => {
+    if (typeof cursor !== "string") cursor = null;
     pending.current?.abort();
     const controller = new AbortController();
     pending.current = controller;
@@ -43,7 +46,9 @@ export function Discovery() {
     const body = {
       query: query.trim() || undefined,
       tags: splitValues(tags),
-      limit: 50,
+      limit: 20,
+      cursor: cursor || undefined,
+      page: true,
     };
     if (view === "missions" && status) body.statuses = [status];
     if (view !== "missions") body.capabilities = splitValues(capabilities);
@@ -63,8 +68,12 @@ export function Discovery() {
       });
       if (!response.ok)
         throw new Error(`Spark API returned ${response.status}`);
-      const nextItems = (await response.json()) ?? [];
-      if (!controller.signal.aborted) setItems(nextItems);
+      const page = await response.json();
+      if (!controller.signal.aborted) {
+        setItems(page.items ?? []);
+        setNextCursor(page.nextCursor);
+        setCurrentCursor(cursor);
+      }
     } catch (reason) {
       if (controller.signal.aborted) return;
       setError(reason.message);
@@ -258,6 +267,8 @@ export function Discovery() {
           </div>
         )}
       </div>
+      {nextCursor && !loading && !error && <button className="button" onClick={() => load(nextCursor)}>Next page →</button>}
+      {currentCursor && !loading && <button className="button" onClick={() => load()}>First page</button>}
     </section>
   );
 }
@@ -268,7 +279,7 @@ function DiscoveryCard({ item, view }) {
     return (
       <a
         className="work-card work-card-link"
-        href={`#mission/${encodeURIComponent(mission.id)}`}
+        href={`/missions/${encodeURIComponent(mission.id)}`}
         aria-label={`Open ${mission.title}`}
       >
         <article>

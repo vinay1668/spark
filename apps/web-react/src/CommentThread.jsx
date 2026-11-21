@@ -39,7 +39,7 @@ export function CommentThread({
     <article
       className={`board-entry ${depth ? "board-comment" : ""} ${depth >= 6 ? "board-comment-deep" : ""} ${unresolved ? "unresolved" : ""}`}
       style={{ "--reply-depth": Math.min(depth, 6) }}
-      onClick={() => onOpen(entry.id)}
+      onClick={(event) => { event.stopPropagation(); onOpen(entry.id); }}
     >
       <div className="board-entry-head">
         {!depth && (

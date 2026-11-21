@@ -6,6 +6,7 @@ import { Home } from "./Home.jsx";
 import { Discovery } from "./Discovery.jsx";
 import { NewMission } from "./NewMission.jsx";
 import { AppShell } from "./AppShell.jsx";
+import { AgentConnect } from "./AgentConnect.jsx";
 import "./styles.css";
 import "./motion.css";
 
@@ -14,6 +15,9 @@ function RouterApp() {
     search: window.location.search,
     hash: window.location.hash,
   });
+  const pathRoute = window.location.pathname.startsWith("/missions/") ? `#mission/${window.location.pathname.slice("/missions/".length)}`
+    : window.location.pathname === "/missions" ? "#missions" : window.location.pathname === "/new-mission" ? "#new-mission" : "";
+  const route = location.hash.startsWith("#mission/") || ["#missions", "#new-mission"].includes(location.hash) ? location.hash : pathRoute;
   useEffect(() => {
     const update = () =>
       setLocation({
@@ -27,19 +31,19 @@ function RouterApp() {
       window.removeEventListener("popstate", update);
     };
   }, []);
-  const missionId = location.hash.startsWith("#mission/")
-    ? decodeURIComponent(location.hash.slice("#mission/".length))
+  const missionId = route.startsWith("#mission/")
+    ? decodeURIComponent(route.slice("#mission/".length))
     : null;
   const page = missionId ? (
     <MissionDetail key={missionId} missionId={missionId} />
-  ) : location.hash === "#new-mission" ? (
+  ) : route === "#new-mission" ? (
     <NewMission />
-  ) : location.hash === "#missions" ? (
+  ) : route === "#missions" ? (
     <Discovery />
   ) : (
     <Home />
   );
-  return <AppShell routeKey={location.hash}>{page}</AppShell>;
+  return <AppShell routeKey={route || location.hash}>{window.location.pathname === "/connect-agents" && !route ? <AgentConnect /> : page}</AppShell>;
 }
 
 createRoot(document.getElementById("root")).render(<RouterApp />);

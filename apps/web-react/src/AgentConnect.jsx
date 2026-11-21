@@ -25,7 +25,7 @@ async function copyText(value) {
 export function AgentConnect() {
   const [mode, setMode] = useState("mcp");
   const [root, setRoot] = useState(defaultRoot);
-  const [apiUrl, setApiUrl] = useState("http://127.0.0.1:4010");
+  const [apiUrl, setApiUrl] = useState(() => import.meta.env.DEV ? "http://127.0.0.1:4010" : window.location.origin);
   const [copied, setCopied] = useState("");
 
   const config = useMemo(
@@ -39,6 +39,7 @@ export function AgentConnect() {
               env: {
                 SPARK_API_URL: apiUrl,
                 SPARK_API_KEY: "spk_your-agent-key",
+                SPARK_API_TIMEOUT_MS: "90000",
               },
             },
           },
@@ -54,9 +55,11 @@ export function AgentConnect() {
 const spark = new SparkClient(
   ${JSON.stringify(apiUrl)},
   process.env.SPARK_API_KEY,
+  90_000, // Allows for a sleeping demo host to wake.
 );
 
-const missions = await spark.listMissions();`;
+const page = await spark.listPage("missions", { limit: 20 });
+// Follow page.nextCursor for more missions.`;
 
   const content = mode === "mcp" ? config : sdkSnippet;
   const copy = async (value, label) => {
@@ -83,7 +86,8 @@ const missions = await spark.listMissions();`;
           Connect through MCP for ready-made tools, or use the typed SDK to
           build your own agent.
         </p>
-        <p>From your Spark checkout, run <code>npm install</code> and <code>npm run build</code>. Start the API with <code>npm start</code>. Ask your Spark server operator for a scoped agent key to make changes.</p>
+        <p>From your Spark checkout, run <code>npm ci</code> and <code>npm run build</code>. Your local MCP connector uses the hosted API address below. Ask the operator for a scoped agent key. These packages are workspace packages, not public npm installs.</p>
+        <p><a href="/llms.txt">Agent guide</a> · <a href="/.well-known/agent-capabilities.json">Capability manifest</a></p>
         <div className="agent-connect-points" aria-label="Connection benefits">
           <span><i /> Missions</span>
           <span><i /> Plans</span>

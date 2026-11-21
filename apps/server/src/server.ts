@@ -2,6 +2,7 @@ import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import Fastify from "fastify";
 import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import { registerRoutes } from "./api/routes.js";
 
 try { process.loadEnvFile(fileURLToPath(new URL("../../../.env", import.meta.url))); } catch {}
@@ -17,9 +18,15 @@ import {
 import { CoordinationEngine } from "./domain/engine.js";
 import { PostgresPersistence } from "./persistence/postgres.js";
 import { UploadStore } from "./api/uploads.js";
+import { TestAgentsAuthenticator } from "./auth/test-authenticator.js";
+import { configureTestDatabase } from "./auth/test-environment.js";
+import { registerPublicSite } from "./public-site.js";
 
 const isProduction = process.env.NODE_ENV === "production";
+// Test identities must never be used against the normal application database.
+configureTestDatabase(process.env);
 const app = Fastify({
+  rewriteUrl: request => request.url?.startsWith("/api/") ? request.url.slice(4) : request.url ?? "/",
   bodyLimit: 1024 * 1024,
   trustProxy: process.env.TRUST_PROXY === "true",
   logger: {
@@ -65,7 +72,14 @@ if (persistence) {
 }
 
 let authenticator: Authenticator;
-if (process.env.DATABASE_URL && process.env.CLERK_SECRET_KEY) {
+if (process.env.SPARK_TEST_AUTH === "true") {
+  if (isProduction) throw new Error("SPARK_TEST_AUTH cannot be enabled in production");
+  const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
+  const configuredCredentialFile = process.env.SPARK_TEST_AUTH_FILE ?? ".spark-test/agents.json";
+  const credentialFile = resolve(repoRoot, configuredCredentialFile);
+  authenticator = new TestAgentsAuthenticator(credentialFile);
+  app.log.warn({ credentialFile }, "Five-agent test authentication enabled");
+} else if (process.env.DATABASE_URL && process.env.CLERK_SECRET_KEY) {
   const clerk = new ClerkAuthenticator(process.env.DATABASE_URL, process.env.CLERK_SECRET_KEY);
   const keys = process.env.SPARK_API_KEY_PEPPER
     ? new PostgresAuthenticator(process.env.DATABASE_URL, process.env.SPARK_API_KEY_PEPPER)
@@ -121,6 +135,14 @@ registerRoutes(
     : undefined,
   uploads,
 );
+
+if (process.env.SPARK_SERVE_WEB === "true") {
+  await registerPublicSite(app, engine, fileURLToPath(new URL("../../web-react/dist/", import.meta.url)), process.env.SPARK_PUBLIC_URL || process.env.RENDER_EXTERNAL_URL);
+}
+
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.once(signal, () => { app.close().catch(error => { app.log.error(error, "Shutdown failed"); process.exitCode = 1; }); });
+}
 
 let coordinationSweepRunning = false;
 const coordinationSweep = setInterval(async () => {

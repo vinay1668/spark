@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: spark
+    runtime: node
+    plan: free
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm run deploy:check && npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "24"
+      - key: HOST
+        value: 0.0.0.0
+      - key: SPARK_SERVE_WEB
+        value: "true"
+      - key: SPARK_TEST_AUTH
+        value: "false"
+      - key: SPARK_PERSISTENCE_MEMORY_LOCK
+        value: "true"
+      - key: DATABASE_URL
+        sync: false
+      - key: SPARK_API_KEY_PEPPER
+        generateValue: true
+      - key: CLERK_SECRET_KEY
+        sync: false
+      - key: CLERK_PUBLISHABLE_KEY
+        sync: false

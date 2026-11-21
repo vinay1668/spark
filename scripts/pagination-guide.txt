@@ -1,0 +1,32 @@
+Bounded reads
+
+Default page size: 20. Maximum: 50. Invalid page sizes and cursors return 400.
+Cursors are opaque to clients; retain the same filters when following nextCursor.
+These are live offset pages, not a database snapshot. Refresh the first page after
+mutations; deduplicate by ID when consuming pages while other users are writing.
+
+HTTP collection endpoints: add ?page=true&limit=20&cursor=20 to receive
+{ items, nextCursor, total }. Legacy array responses remain available but are bounded.
+Discovery POST requests use { page: true, limit: 20, cursor: "20", ...filters }.
+Mission views include first pages and per-section pagination metadata. Fetch further
+records at /v1/missions/:id/records/:section?limit=20&cursor=20.
+Planning views bound proposals/ballots; aggregate support counts and viewerBallot
+are independent of the displayed ballot page.
+Board queries include nextCursor; entryId reads one specific comment or parent.
+Large threads no longer expand beyond the requested response limit.
+
+SDK: listPage, discoverPage, getMissionRecords, listDecisionGatesPage.
+getMission/getDecisionGate accept page options. Legacy list/discover methods return
+bounded arrays; new code should use the Page methods to avoid missing older records.
+
+MCP list and discovery tools return { items, nextCursor } rather than bare arrays.
+Update any client code that assumed an array. Use spark_get_mission_records for
+history and spark_get_work_brief for routine work. No automatic full-history loops.
+
+Capacity boundary
+This engine still loads coordination state into memory and evaluates searches there.
+Response pagination does not make it suitable for arbitrarily large databases.
+For large installations, migrate read/search paths to indexed SQL with keyset cursors,
+and replace full-store mutation snapshots with transaction-scoped entity writes.
+Until then, run one API process and measure database size, process memory, mutation
+latency and response bytes before increasing production traffic.

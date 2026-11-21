@@ -268,31 +268,41 @@ export function Board({ missionId, tasks = [] }) {
   const [attachments, setAttachments] = useState([]);
   const [posting, setPosting] = useState(false);
   const [error, setError] = useState("");
-  const load = useCallback(async () => {
+  const pendingRead = useRef(null);
+  const [currentCursor, setCurrentCursor] = useState(null);
+  const [expandedThreads, setExpandedThreads] = useState(new Set());
+  const load = useCallback(async (cursor = null, entryId = undefined) => {
+    pendingRead.current?.abort();
+    const controller = new AbortController();
+    pendingRead.current = controller;
     if (!missionId) return;
     const response = await fetch(
       api(`/v1/missions/${encodeURIComponent(missionId)}/board/query`),
       {
+        signal: controller.signal,
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           query: query.trim() || undefined,
+          entryId,
           types: type ? [type] : [],
           tags: [],
           unresolvedOnly,
-          limit: 50,
+          limit: 20,
+          cursor: typeof cursor === "string" ? cursor : undefined,
         }),
       },
     );
     if (!response.ok) throw new Error("Could not load the board");
-    setBoard(await response.json());
+    const page = await response.json();
+    if (!controller.signal.aborted) { setBoard(page); setCurrentCursor(cursor || entryId || null); setError(""); }
   }, [missionId, query, type, unresolvedOnly]);
   useEffect(() => {
     const timer = setTimeout(
-      () => load().catch((reason) => setError(reason.message)),
+      () => load().catch((reason) => reason.name !== "AbortError" && setError(reason.message)),
       query ? 250 : 0,
     );
-    return () => clearTimeout(timer);
+    return () => { clearTimeout(timer); pendingRead.current?.abort(); };
   }, [load, query]);
   const roots = useMemo(() => {
     if (!board) return [];
@@ -307,7 +317,9 @@ export function Board({ missionId, tasks = [] }) {
           (byParent.set(parent.entryId, []), byParent.get(parent.entryId))
         ).push(state);
     }
-    const render = (state, depth = 0) => (
+    const render = (state, depth = 0) => depth > 5 && !expandedThreads.has(state.entry.id) ? (
+      <button key={state.entry.id} className="button compact" onClick={(event) => { event.stopPropagation(); setExpandedThreads(current => new Set([...current, state.entry.id])); }}>Continue thread →</button>
+    ) : (
       <CommentThread
         key={state.entry.id}
         state={state}
@@ -358,11 +370,17 @@ export function Board({ missionId, tasks = [] }) {
       .filter(
         (state) =>
           !state.entry.references.some(
-            (reference) => reference.relation === "REPLIES_TO",
+              (reference) => reference.relation === "REPLIES_TO" && board.entries.some(candidate => candidate.entry.id === reference.entryId),
           ),
       )
-      .map((state) => render(state));
-  }, [board, load, missionId]);
+      .map((state) => {
+        const parent = state.entry.references.find(reference => reference.relation === "REPLIES_TO");
+        return <div key={state.entry.id}>
+          {parent && <button className="button compact" onClick={() => load(null, parent.entryId).catch(reason => setError(reason.message))}>View earlier comment ↑</button>}
+          {render(state)}
+        </div>;
+      });
+  }, [board, load, missionId, expandedThreads]);
   if (!missionId)
     return (
       <main className="react-migration-preview">
@@ -668,6 +686,8 @@ export function Board({ missionId, tasks = [] }) {
         <div className="board-feed">
           {board ? roots : <div className="compact-empty">Loading board…</div>}
         </div>
+        {board?.nextCursor && <button className="button compact" onClick={() => load(board.nextCursor).catch(reason => setError(reason.message))}>Next comments →</button>}
+        {board && currentCursor && <button className="button compact" onClick={() => load().catch(reason => setError(reason.message))}>First comments</button>}
       </section>
       {selected && (
         <DetailsDialog

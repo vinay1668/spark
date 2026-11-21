@@ -425,7 +425,7 @@ export class CoordinationEngine {
       proposalClosesAt,
       reviewClosesAt,
       ownerDecisionClosesAt,
-      minIndependentBallots: input.minIndependentBallots,
+      minIndependentBallots: agentApprovalTarget(interestedAgentCount),
       interestedAgentCount,
       requiredApprovals: agentApprovalTarget(interestedAgentCount),
       autoSelect: input.autoSelect,
@@ -509,6 +509,7 @@ export class CoordinationEngine {
       const interestedAgentCount = this.interestedAgentCount(gate.missionId);
       gate.interestedAgentCount = interestedAgentCount;
       gate.requiredApprovals = agentApprovalTarget(interestedAgentCount);
+      gate.minIndependentBallots = gate.requiredApprovals;
       gate.quorumSnapshotAt = proposal.createdAt;
       gate.status = "REVIEWING";
       this.record("decision_gate.quorum_opened", input.proposedBy, gate.missionId, "DECISION_GATE", gate.id, {
@@ -595,7 +596,9 @@ export class CoordinationEngine {
   decisionGateView(gateId: string): DecisionGateView {
     const gate = this.decisionGate(gateId);
     return {
-      gate,
+      gate: gate.decisionModel === "AGENT_QUORUM"
+        ? { ...gate, minIndependentBallots: gate.requiredApprovals ?? agentApprovalTarget(gate.interestedAgentCount ?? 0) }
+        : gate,
       proposals: [...this.store.decisionProposals.values()].filter((proposal) => proposal.gateId === gate.id),
       ballots: [...this.store.decisionBallots.values()].filter((ballot) => ballot.gateId === gate.id),
       ranking: this.rankDecisionProposals(gate.id),
@@ -1447,6 +1450,21 @@ export class CoordinationEngine {
       }
     }
 
+    // Suppress exact repeated agent updates, including retries without a key.
+    // Evidence, parent, requested action and task changes remain distinct updates.
+    if (input.author.type === "agent") {
+      const content = (entry: { taskId?: string | undefined; type: BoardEntryType; summary: string; details?: string | undefined; evidence?: Evidence[] | undefined; attachments?: Attachment[] | undefined; references?: BoardReference[] | undefined; tags?: string[] | undefined; confidence?: BoardEntry["confidence"] | undefined; requestedAction?: string | undefined }) => JSON.stringify({
+        taskId: entry.taskId, type: entry.type, summary: entry.summary.trim(), details: entry.details?.trim() || undefined,
+        evidence: entry.evidence ?? [], attachments: entry.attachments ?? [], references: entry.references ?? [],
+        tags: labels(entry.tags).sort(), confidence: entry.confidence ?? "MEDIUM", requestedAction: entry.requestedAction?.trim() || undefined,
+      });
+      const fingerprint = content(input);
+      const duplicate = [...this.store.boardEntries.values()].find(entry => entry.missionId === mission.id
+        && entry.author.id === input.author.id && Date.parse(entry.createdAt) >= Date.now() - 3_600_000
+        && content(entry) === fingerprint);
+      if (duplicate) return duplicate;
+    }
+
     const entry: BoardEntry = {
       id: randomUUID(),
       missionId: mission.id,
@@ -1504,6 +1522,7 @@ export class CoordinationEngine {
   }
 
   queryMissionBoard(input: {
+    entryId?: string | undefined;
     missionId: string;
     taskId?: string | undefined;
     query?: string | undefined;
@@ -1513,6 +1532,7 @@ export class CoordinationEngine {
     after?: string | undefined;
     limit?: number | undefined;
     viewerId?: string | undefined;
+    cursor?: string | undefined;
   }): MissionBoardBrief {
     const mission = this.mission(input.missionId);
     if (input.taskId) {
@@ -1536,6 +1556,7 @@ export class CoordinationEngine {
 
     const states: BoardEntryState[] = [];
     for (const entry of missionEntries) {
+      if (input.entryId && entry.id !== input.entryId) continue;
       if (input.taskId && entry.taskId !== input.taskId) continue;
       if (requestedTypes.length > 0 && !requestedTypes.includes(entry.type)) continue;
       if (!requestedTags.every((tag) => entry.tags.includes(tag))) continue;
@@ -1565,7 +1586,7 @@ export class CoordinationEngine {
         + (entry.evidence.length > 0 ? 2 : 0)
         + (entry.confidence === "HIGH" ? 1 : 0);
       states.push({
-        entry,
+        entry: { ...entry, votes: [] },
         resolvedBy: resolvedBy.slice(-5),
         supersededBy: supersededBy.slice(-5),
         duplicatedBy: duplicatedBy.slice(-5),
@@ -1578,36 +1599,10 @@ export class CoordinationEngine {
         votedByViewer: Boolean(input.viewerId && entry.votes?.some((vote) => vote.voterId === input.viewerId)),
       });
     }
-    states.sort((left, right) => right.score - left.score || right.entry.createdAt.localeCompare(left.entry.createdAt));
-    // A thread is the unit rendered by the client. Keep the requested page small,
-    // but never cut a selected reply away from its parent or its descendants.
-    const stateById = new Map(states.map((state) => [state.entry.id, state]));
-    const selectedIds = new Set(states.slice(0, limit).map((state) => state.entry.id));
-    const childrenByParent = new Map<string, string[]>();
-    for (const candidate of missionEntries) {
-      const parent = candidate.references.find((reference) => reference.relation === "REPLIES_TO");
-      if (!parent) continue;
-      const children = childrenByParent.get(parent.entryId) ?? [];
-      children.push(candidate.id);
-      childrenByParent.set(parent.entryId, children);
-    }
-    for (const id of [...selectedIds]) {
-      let cursor = stateById.get(id)?.entry;
-      while (cursor) {
-        const parent = cursor.references.find((reference) => reference.relation === "REPLIES_TO");
-        if (!parent || !stateById.has(parent.entryId)) break;
-        selectedIds.add(parent.entryId);
-        cursor = stateById.get(parent.entryId)?.entry;
-      }
-      const queue = [...(childrenByParent.get(id) ?? [])];
-      while (queue.length) {
-        const childId = queue.shift();
-        if (!childId || selectedIds.has(childId) || !stateById.has(childId)) continue;
-        selectedIds.add(childId);
-        queue.push(...(childrenByParent.get(childId) ?? []));
-      }
-    }
-    const entries = states.filter((state) => selectedIds.has(state.entry.id));
+    states.sort((left, right) => right.score - left.score || right.entry.createdAt.localeCompare(left.entry.createdAt) || left.entry.id.localeCompare(right.entry.id));
+    // A response is strictly bounded even when one thread has thousands of replies.
+    const offset = Number(input.cursor ?? 0);
+    const entries = states.slice(offset, offset + Math.min(limit, 50));
     return {
       mission: { id: mission.id, title: mission.title, status: mission.status, tags: mission.tags },
       generatedAt: now(),
@@ -1621,6 +1616,7 @@ export class CoordinationEngine {
         limit,
       },
       entries,
+      nextCursor: offset + limit < states.length ? String(offset + limit) : null,
       counts: {
         matched: states.length,
         unresolved: states.filter((state) => state.unresolved).length,
@@ -1699,6 +1695,7 @@ export class CoordinationEngine {
   }
 
   discoverTasks(input: {
+    cursor?: string | undefined;
     query?: string | undefined;
     missionId?: string | undefined;
     tags?: string[] | undefined;
@@ -1747,10 +1744,11 @@ export class CoordinationEngine {
     }
     return opportunities
       .sort((left, right) => right.score - left.score || left.task.createdAt.localeCompare(right.task.createdAt))
-      .slice(0, input.limit ?? 20);
+      .slice(Number(input.cursor ?? 0), Number(input.cursor ?? 0) + (input.limit ?? 20));
   }
 
   discoverMissions(input: {
+    cursor?: string | undefined;
     query?: string | undefined;
     tags?: string[] | undefined;
     statuses?: Mission["status"][] | undefined;
@@ -1760,11 +1758,17 @@ export class CoordinationEngine {
     const terms = queryTerms(input.query);
     const statuses = input.statuses ?? [];
     const results: MissionOpportunity[] = [];
+    const tasksByMission = new Map<string, Task[]>();
+    for (const task of this.store.tasks.values()) {
+      const group = tasksByMission.get(task.missionId) ?? [];
+      group.push(task);
+      tasksByMission.set(task.missionId, group);
+    }
     for (const mission of this.store.missions.values()) {
       if (statuses.length > 0 && !statuses.includes(mission.status)) continue;
       const missionTags = labels(mission.tags);
       if (!requestedTags.every((tag) => missionTags.includes(tag))) continue;
-      const tasks = [...this.store.tasks.values()].filter((task) => task.missionId === mission.id);
+      const tasks = tasksByMission.get(mission.id) ?? [];
       const requiredCapabilities = labels(tasks.flatMap((task) => task.requiredCapabilities ?? []));
       const haystack = [mission.title, mission.description, ...missionTags, ...requiredCapabilities]
         .join(" ")
@@ -1777,10 +1781,11 @@ export class CoordinationEngine {
     }
     return results
       .sort((left, right) => right.score - left.score || right.mission.createdAt.localeCompare(left.mission.createdAt))
-      .slice(0, input.limit ?? 20);
+      .slice(Number(input.cursor ?? 0), Number(input.cursor ?? 0) + (input.limit ?? 20));
   }
 
   discoverPublications(input: {
+    cursor?: string | undefined;
     query?: string | undefined;
     tags?: string[] | undefined;
     capabilities?: string[] | undefined;
@@ -1811,7 +1816,7 @@ export class CoordinationEngine {
     }
     return results
       .sort((left, right) => right.score - left.score || right.publication.createdAt.localeCompare(left.publication.createdAt))
-      .slice(0, input.limit ?? 20);
+      .slice(Number(input.cursor ?? 0), Number(input.cursor ?? 0) + (input.limit ?? 20));
   }
 
   private rankDecisionProposals(gateId: string): DecisionRankingEntry[] {

@@ -1,4 +1,6 @@
 import type {
+  Page,
+  AgentWorkBrief,
   AgentDelegation,
   Attachment,
   BoardEntry,
@@ -28,6 +30,7 @@ import type {
 } from "@spark/contracts";
 
 export interface MissionView {
+  pagination?: Record<string, { nextCursor: string | null; total: number }>;
   mission: Mission;
   plans: PlanProposal[];
   decisionGates: DecisionGate[];
@@ -45,9 +48,17 @@ export interface MissionView {
 }
 
 export class SparkApiError extends Error {
+  readonly recovery: string;
   constructor(readonly status: number, readonly body: unknown) {
-    super(`Spark API returned ${status}`);
+    const details = body as { message?: string; error?: string; issues?: Array<{ message: string }> } | undefined;
+    super(`Spark API returned ${status}: ${details?.message ?? details?.issues?.map((issue) => issue.message).join("; ") ?? details?.error ?? "Request failed"}`);
     this.name = "SparkApiError";
+    this.recovery = status === 401 || status === 403 ? "Stop retries. Check credentials or permissions; report one blocker."
+      : status === 400 ? "Correct the invalid fields before retrying."
+      : status === 409 ? "Refresh the work brief and relevant record. Correct the rule conflict or choose another task; do not repeat unchanged requests."
+      : status === 429 ? "Back off before retrying; do not post repeated status messages."
+      : "Read the current state before retrying a mutation. Use an idempotency key where supported.";
+    this.message += ` ${this.recovery}`;
   }
 }
 
@@ -57,7 +68,9 @@ export class SparkClient {
   constructor(
     baseUrl: string,
     private readonly apiKey?: string,
+    private readonly timeoutMs: number = 30_000,
   ) {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 120_000) throw new Error("API timeout must be between 1000 and 120000 milliseconds");
     this.baseUrl = baseUrl.replace(/\/$/, "");
   }
 
@@ -65,8 +78,26 @@ export class SparkClient {
     return this.request("/v1/missions");
   }
 
-  getMission(missionId: string): Promise<MissionView> {
-    return this.request(`/v1/missions/${missionId}`);
+  getMission(missionId: string, input: { limit?: number | undefined; cursor?: string | undefined } = {}): Promise<MissionView> {
+    return this.request(`/v1/missions/${missionId}?${new URLSearchParams({ limit: String(input.limit ?? 20), ...(input.cursor ? { cursor: input.cursor } : {}) })}`);
+  }
+
+  getWorkBrief(missionId: string, after?: string): Promise<AgentWorkBrief> {
+    return this.request(`/v1/missions/${encodeURIComponent(missionId)}/work-brief${after ? `?after=${encodeURIComponent(after)}` : ""}`);
+  }
+
+  listPage<T = Mission | Task | Publication>(resource: "missions" | "tasks" | "publications", input: { limit?: number | undefined; cursor?: string | undefined; missionId?: string | undefined } = {}): Promise<Page<T>> {
+    const query = new URLSearchParams({ page: "true", limit: String(input.limit ?? 20), ...(input.cursor ? { cursor: input.cursor } : {}), ...(input.missionId ? { missionId: input.missionId } : {}) });
+    return this.request(`/v1/${resource === "tasks" ? "tasks/open" : resource}?${query}`);
+  }
+
+  getMissionRecords<T = unknown>(missionId: string, section: Exclude<keyof MissionView, "mission" | "pagination">, input: { limit?: number | undefined; cursor?: string | undefined } = {}): Promise<Page<T>> {
+    const query = new URLSearchParams({ limit: String(input.limit ?? 20), ...(input.cursor ? { cursor: input.cursor } : {}) });
+    return this.request(`/v1/missions/${encodeURIComponent(missionId)}/records/${section}?${query}`);
+  }
+
+  discoverPage<T = MissionOpportunity | TaskOpportunity | PublicationOpportunity>(resource: "missions" | "tasks" | "publications", input: Record<string, unknown> = {}): Promise<Page<T>> {
+    return this.request(`/v1/discovery/${resource}`, { method: "POST", body: JSON.stringify({ ...input, page: true }) });
   }
 
   /** Bounded handoff context: next action, recent direction and submitted code evidence. */
@@ -128,6 +159,8 @@ export class SparkClient {
   readBoard(
     missionId: string,
     input: {
+      entryId?: string | undefined;
+      cursor?: string | undefined;
       taskId?: string | undefined;
       query?: string | undefined;
       types?: BoardEntryType[] | undefined;
@@ -217,8 +250,12 @@ export class SparkClient {
     return this.request(`/v1/missions/${missionId}/decision-gates`);
   }
 
-  getDecisionGate(gateId: string): Promise<DecisionGateView> {
-    return this.request(`/v1/decision-gates/${gateId}`);
+  listDecisionGatesPage(missionId: string, input: { limit?: number | undefined; cursor?: string | undefined } = {}): Promise<Page<DecisionGateView>> {
+    return this.request(`/v1/missions/${missionId}/decision-gates?${new URLSearchParams({ page: "true", limit: String(input.limit ?? 20), ...(input.cursor ? { cursor: input.cursor } : {}) })}`);
+  }
+
+  getDecisionGate(gateId: string, input: { limit?: number | undefined; cursor?: string | undefined } = {}): Promise<DecisionGateView> {
+    return this.request(`/v1/decision-gates/${gateId}?${new URLSearchParams({ limit: String(input.limit ?? 20), ...(input.cursor ? { cursor: input.cursor } : {}) })}`);
   }
 
   getAgentInterest(missionId: string): Promise<{
@@ -487,6 +524,7 @@ export class SparkClient {
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(`${this.baseUrl}${path}`, {
+      signal: AbortSignal.timeout(this.timeoutMs),
       ...init,
       headers: {
         ...(init?.body ? { "content-type": "application/json" } : {}),

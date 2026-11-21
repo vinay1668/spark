@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { getAuthHeaders } from "./identity.js";
 import { post } from "./Board.jsx";
 import { AttachmentInput } from "./AttachmentInput.jsx";
 import { PixelLoader } from "./PixelLoader.jsx";
@@ -36,7 +37,10 @@ function ThreadAuthor({ actor }) {
   );
 }
 
-export function DecisionPanel({ gateView, onChanged, mission, actorId, canRespond = false }) {
+export function DecisionPanel({ gateView: initialView, onChanged, mission, actorId, canRespond = false }) {
+  const [loadedView, setLoadedView] = useState(null);
+  useEffect(() => setLoadedView(null), [initialView]);
+  const gateView = loadedView ?? initialView;
   const { gate, proposals = [], ballots = [] } = gateView;
   const isOwner = mission.creator.id === actorId;
 
@@ -51,8 +55,8 @@ export function DecisionPanel({ gateView, onChanged, mission, actorId, canRespon
   const [message, setMessage] = useState("");
 
   const myBallot = useMemo(
-    () => ballots.find((ballot) => ballot.voter.id === actorId),
-    [ballots, actorId],
+    () => gateView.viewerBallot ?? ballots.find((ballot) => ballot.voter.id === actorId),
+    [ballots, actorId, gateView.viewerBallot],
   );
   const supportingId = myBallot?.rankedProposalIds[0] ?? null;
   const myBlocks = useMemo(() => {
@@ -75,12 +79,12 @@ export function DecisionPanel({ gateView, onChanged, mission, actorId, canRespon
     }
     return proposals.map((proposal) => ({
       proposal,
-      support: support.get(proposal.id) ?? 0,
-      blocks: blocks.get(proposal.id) ?? 0,
+      support: gateView.ranking?.find(item => item.proposal.id === proposal.id)?.agentFirstChoices ?? support.get(proposal.id) ?? 0,
+      blocks: gateView.ranking?.find(item => item.proposal.id === proposal.id)?.blockingObjections ?? blocks.get(proposal.id) ?? 0,
       score: (support.get(proposal.id) ?? 0) - (blocks.get(proposal.id) ?? 0) * 2,
       selected: gate.selectedProposalId === proposal.id,
     }));
-  }, [proposals, ballots, gate.selectedProposalId]);
+  }, [proposals, ballots, gate.selectedProposalId, gateView.ranking]);
 
   const alreadyProposed = proposals.some(
     (proposal) => proposal.proposedBy.id === actorId,
@@ -252,8 +256,17 @@ export function DecisionPanel({ gateView, onChanged, mission, actorId, canRespon
         </span>
       </div>
       <p className="decision-phase">{phase}</p>
+      {gate.decisionModel === "AGENT_QUORUM" && <p className="decision-phase">Approvals determine selection. Objections are advisory and stay in the audit history. The approval threshold freezes when the first plan is submitted.</p>}
 
       <div className="decision-proposals">
+        {gateView.pagination?.proposals?.nextCursor && <button className="button compact" onClick={async () => {
+          try {
+            const response = await fetch(`/api/v1/decision-gates/${gate.id}?cursor=${gateView.pagination.proposals.nextCursor}`, { headers: await getAuthHeaders() });
+            if (!response.ok) throw new Error("Could not load proposals");
+            setLoadedView(await response.json());
+          } catch (error) { setMessage(error.message); }
+        }}>Next proposals →</button>}
+        {loadedView && <button className="button compact" onClick={() => setLoadedView(null)}>First proposals</button>}
         {scoredProposals.length ? (
           scoredProposals.map((entry) => {
             const { proposal, support, blocks, score, selected } = entry;

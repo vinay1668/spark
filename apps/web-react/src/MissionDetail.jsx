@@ -13,6 +13,12 @@ async function readAgentInterest(missionId) {
   return response.ok ? response.json() : null;
 }
 
+async function readPlanningPage(missionId, cursor) {
+  const response = await fetch(`/api/v1/missions/${encodeURIComponent(missionId)}/decision-gates?page=true&limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, { headers: await getAuthHeaders() });
+  if (!response.ok) throw new Error("Could not load planning threads");
+  return response.json();
+}
+
 const displayStatus = (value) =>
   value
     .replaceAll("_", " ")
@@ -36,6 +42,8 @@ export function MissionDetail({ missionId }) {
   const [historyLimit, setHistoryLimit] = useState(5);
   const [showResolved, setShowResolved] = useState(false);
   const [taskLimit, setTaskLimit] = useState(20);
+  const [taskCursor, setTaskCursor] = useState(null);
+  const [gateCursor, setGateCursor] = useState(null);
   useEffect(() => {
     let active = true;
     getActiveIdentity().then((next) => active && setIdentity(next));
@@ -52,9 +60,7 @@ export function MissionDetail({ missionId }) {
           return response.json();
         },
       ),
-      fetch(
-        `/api/v1/missions/${encodeURIComponent(missionId)}/decision-gates`,
-      ).then((response) => (response.ok ? response.json() : [])),
+      readPlanningPage(missionId),
       fetch(`/api/v1/missions/${encodeURIComponent(missionId)}/progress`).then((response) => {
         if (!response.ok) throw new Error("Could not load mission progress.");
         return response.json();
@@ -72,7 +78,7 @@ export function MissionDetail({ missionId }) {
       }).then((response) => (response.ok ? response.json() : null)),
     ])
       .then(([nextView, decisionGates, progress, agentInterest, board]) => {
-        if (active) setView({ ...nextView, decisionGates, progress, agentInterest, board });
+        if (active) setView({ ...nextView, decisionGates: decisionGates.items ?? [], gateTotal: decisionGates.total, gateNextCursor: decisionGates.nextCursor, progress, agentInterest, board });
       })
       .catch((reason) => {
         if (active) setError(reason.message);
@@ -114,10 +120,10 @@ export function MissionDetail({ missionId }) {
     humanRequests = [],
     claims = [],
   } = view;
-  const activeTasks = tasks.filter((task) =>
+  const activeTasks = view.progress?.counts.active ?? tasks.filter((task) =>
     ["OPEN", "CLAIMED", "SUBMITTED", "VERIFYING"].includes(task.status),
   ).length;
-  const verifiedTasks = tasks.filter(
+  const verifiedTasks = view.progress?.counts.verified ?? tasks.filter(
     (task) => task.status === "VERIFIED",
   ).length;
   const stage = missionStage(mission.status);
@@ -134,9 +140,7 @@ export function MissionDetail({ missionId }) {
       fetch(`/api/v1/missions/${encodeURIComponent(missionId)}`).then(
         (result) => result.json(),
       ),
-      fetch(
-        `/api/v1/missions/${encodeURIComponent(missionId)}/decision-gates`,
-      ).then((result) => result.json()),
+      readPlanningPage(missionId),
       fetch(`/api/v1/missions/${encodeURIComponent(missionId)}/progress`).then((response) => {
         if (!response.ok) throw new Error("Could not load mission progress.");
         return response.json();
@@ -153,7 +157,25 @@ export function MissionDetail({ missionId }) {
         }),
       }).then((result) => result.json()),
     ]);
-    setView({ ...next, decisionGates: gates, progress, agentInterest: interest, board });
+    setTaskCursor(null); setGateCursor(null);
+    setView({ ...next, decisionGates: gates.items ?? [], gateTotal: gates.total, gateNextCursor: gates.nextCursor, progress, agentInterest: interest, board });
+  };
+  const nextTasks = async (cursor) => {
+    try {
+      const response = await fetch(`/api/v1/missions/${encodeURIComponent(missionId)}/records/tasks?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+      if (!response.ok) throw new Error("Could not load tasks");
+      const page = await response.json();
+      setTaskCursor(cursor);
+      setTaskLimit(20);
+      setView(current => ({ ...current, tasks: page.items, pagination: { ...current.pagination, tasks: { nextCursor: page.nextCursor, total: page.total } } }));
+    } catch (reason) { setError(reason.message); }
+  };
+  const nextGates = async (cursor) => {
+    try {
+      const page = await readPlanningPage(missionId, cursor);
+      setGateCursor(cursor);
+      setView(current => ({ ...current, decisionGates: page.items, gateNextCursor: page.nextCursor }));
+    } catch (reason) { setError(reason.message); }
   };
   const claim = async (taskId) => {
     if (!(await isAuthenticated())) {
@@ -241,6 +263,8 @@ export function MissionDetail({ missionId }) {
           ))}
         </div>
         <MissionProgress progress={view.progress} isOwner={isOwner && identity?.kind === "account"} actorId={actorId} onChanged={refresh} />
+        {view.gateNextCursor && <button className="button compact" onClick={() => nextGates(view.gateNextCursor)}>Next planning threads →</button>}
+        {gateCursor && <button className="button compact" onClick={() => nextGates(null)}>First planning threads</button>}
         <div className="mission-columns">
           <main className="mission-work">
             <section className="mission-section">
@@ -249,7 +273,7 @@ export function MissionDetail({ missionId }) {
                   <span className="pixel-label">DIRECTION</span>
                   <h2>Planning threads</h2>
                 </div>
-                <span>{view.decisionGates.length} threads</span>
+                <span>{view.gateTotal ?? view.decisionGates.length} threads</span>
                 {view.agentInterest?.actorType === "agent" && (
                   <button
                     className="button compact"
@@ -396,6 +420,8 @@ export function MissionDetail({ missionId }) {
               </div>
             </section>
             {visibleTasks.length > taskLimit && <button className="button compact" onClick={() => setTaskLimit((limit) => limit + 20)}>Show more tasks</button>}
+            {view.pagination?.tasks?.nextCursor && <button className="button compact" onClick={() => nextTasks(view.pagination.tasks.nextCursor)}>Next tasks →</button>}
+            {taskCursor && <button className="button compact" onClick={() => nextTasks(null)}>First tasks</button>}
             <Board missionId={missionId} tasks={tasks} />
           </main>
           <aside className="mission-sidebar">

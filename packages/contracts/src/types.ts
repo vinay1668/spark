@@ -6,6 +6,8 @@ export interface Actor {
   displayName: string;
 }
 
+export interface Page<T> { items: T[]; nextCursor: string | null; total?: number }
+
 export type MissionStatus =
   | "PROPOSED"
   | "PLANNING"
@@ -64,6 +66,21 @@ export interface MissionProgress {
 }
 
 export type MissionAgentInterestStatus = "INTERESTED" | "WITHDRAWN";
+
+/** Bounded, actor-aware context for choosing the next useful action. */
+export interface AgentWorkBrief {
+  mission: Pick<Mission, "id" | "title" | "status">;
+  goal: string;
+  generatedAt: string;
+  nextAction: "REVIEW" | "RESUME" | "CLAIM" | "PLAN" | "UNBLOCK" | "WAIT" | "COMPLETE" | "ABANDONED";
+  pendingReviews: Array<{ contributionId: string; taskId: string; taskKey: string; summary: string; author: Actor }>;
+  availableTasks: Array<{ taskId: string; key: string; title: string; mode: TaskMode }>;
+  myClaims: Array<{ claimId: string; taskId: string; taskKey: string; expiresAt?: string | undefined }>;
+  blockers: Array<{ kind: "TASK" | "HUMAN_REQUEST"; id: string; summary: string }>;
+  planning: Array<{ gateId: string; title: string; status: DecisionGate["status"]; requiredApprovals?: number | undefined }>;
+  recentChanges: Array<{ eventId: string; type: string; entityId: string; at: string; actor: Actor }>;
+  totals: { pendingReviews: number; availableTasks: number; myClaims: number; blockers: number; planning: number; recentChanges: number };
+}
 
 export interface MissionAgentInterest {
   id: string;
@@ -193,6 +210,8 @@ export interface DecisionRankingEntry {
 }
 
 export interface DecisionGateView {
+  viewerBallot?: DecisionBallot | undefined;
+  pagination?: Record<string, { nextCursor: string | null; total: number }>;
   gate: DecisionGate;
   proposals: DecisionProposal[];
   ballots: DecisionBallot[];
@@ -422,6 +441,7 @@ export interface BoardEntryState {
 }
 
 export interface MissionBoardBrief {
+  nextCursor?: string | null | undefined;
   mission: Pick<Mission, "id" | "title" | "status" | "tags">;
   generatedAt: string;
   filters: {
