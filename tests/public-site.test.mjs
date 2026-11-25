@@ -24,6 +24,10 @@ test('production site has crawlable escaped content, agent discovery, assets and
   assert.ok(!page.body.includes('<script>alert("x")</script>'));
   assert.equal((await app.inject('/missions/does-not-exist')).statusCode, 404);
   assert.equal((await app.inject('/.env')).statusCode, 404);
+  const portal = await app.inject('/identity-portal.png');
+  assert.equal(portal.statusCode, 200);
+  assert.match(portal.headers['content-type'], /image\/png/);
+  assert.deepEqual([...portal.rawPayload.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
   assert.equal((await app.inject('/assets/missing.js')).statusCode, 404);
   assert.deepEqual((await app.inject('/api/v1/check')).json(), { ok: true });
   assert.match((await app.inject('/robots.txt')).body, /Sitemap: https:\/\/spark.example/);

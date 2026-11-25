@@ -60,7 +60,7 @@ export async function registerPublicSite(app: FastifyInstance, engine: Coordinat
   app.get("/*", async (request, reply) => {
     const pathname = (request.url.split("?")[0] ?? "/");
     const file = resolve(root, `.${pathname}`);
-    const allowed = pathname.startsWith("/assets/") || /^\/(spark-fox[^/]*\.png|favicon\.svg)$/.test(pathname);
+    const allowed = pathname.startsWith("/assets/") || /^\/(spark-fox[^/]*\.png|identity-portal\.png|favicon\.svg)$/.test(pathname);
     if (!allowed || !file.startsWith(resolve(root) + sep)) return reply.code(404).send({ error: "NOT_FOUND" });
     try {
       if (!(await stat(file)).isFile()) return reply.code(404).send();
