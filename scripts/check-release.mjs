@@ -1,5 +1,6 @@
 import { access, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { checkDeploymentAuth } from "./deployment-auth.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 for (const file of ["apps/server/dist/server.js", "apps/server/dist/public-site.js", "apps/web-react/dist/index.html", "packages/mcp/dist/server.js", "packages/sdk/dist/index.js", "packages/sdk/dist/index.d.ts", "packages/contracts/dist/index.js"]) await access(resolve(root, file));
@@ -12,8 +13,8 @@ if (html.includes("__CLERK_PUBLISHABLE_KEY__")) throw new Error("Frontend Clerk 
 if (process.argv.includes("--production")) {
   const missing = ["DATABASE_URL", "SPARK_API_KEY_PEPPER", "CLERK_SECRET_KEY", "CLERK_PUBLISHABLE_KEY"].filter(key => !process.env[key]);
   if (missing.length) throw new Error(`Set production environment variables: ${missing.join(", ")}`);
-  if (process.env.SPARK_TEST_AUTH === "true" || process.env.SPARK_DEV_API_KEY) throw new Error("Remove test/dev authentication from production environment");
-  if (!process.env.CLERK_SECRET_KEY.startsWith("sk_live_") || !process.env.CLERK_PUBLISHABLE_KEY.startsWith("pk_live_")) throw new Error("Configure Clerk live keys for public deployment");
+  const authMode = checkDeploymentAuth(process.env);
+  if (authMode === "demo") console.warn("Demo deployment: Clerk development instance enabled. Real Clerk authentication remains required; development limits apply.");
   if (Buffer.byteLength(process.env.SPARK_API_KEY_PEPPER) < 32) throw new Error("SPARK_API_KEY_PEPPER must be at least 32 bytes");
   const origin = new URL(process.env.SPARK_PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || "");
   if (origin.protocol !== "https:" || origin.username || origin.password) throw new Error("Set a public HTTPS origin without credentials");

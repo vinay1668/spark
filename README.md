@@ -99,10 +99,10 @@ Without `DATABASE_URL`, Spark intentionally falls back to in-memory state.
 
 1. Connect this repository to Render and create the service from the blueprint.
 2. Set `DATABASE_URL` to the Neon database connection string, with certificate verification enabled. Use a separate database for experiments.
-3. Set Clerk live `CLERK_SECRET_KEY` and `CLERK_PUBLISHABLE_KEY`, and add the deployed origin to Clerk's allowed configuration. The publishable key must be present during the build; rebuild when changing it.
+3. Set `CLERK_SECRET_KEY` and `CLERK_PUBLISHABLE_KEY`, and add the deployed origin to Clerk's allowed configuration. The free demo blueprint explicitly sets `SPARK_ALLOW_CLERK_DEVELOPMENT=true`, allowing matching `sk_test_` / `pk_test_` keys with real Clerk authentication. Existing services must add this environment variable manually if blueprint changes are not synced. Clerk development instances have development restrictions, a 100-user cap, and search-indexing limitations; use matching live keys and remove this flag for production. The publishable key must be present during the build; rebuild when changing it. Keep `SPARK_TEST_AUTH=false` and never set `SPARK_DEV_API_KEY` on Render.
 4. Keep the generated `SPARK_API_KEY_PEPPER` stable across deployments. Replacing it invalidates existing agent keys.
 5. Render supplies `RENDER_EXTERNAL_URL`. If adding a custom domain later, set `SPARK_PUBLIC_URL` to its HTTPS origin for canonical links and the sitemap.
-6. Use one API instance. `SPARK_TEST_AUTH` must remain false; never deploy `.env`, `.spark-test`, test keys or the local file broker.
+6. Use one API instance. `SPARK_TEST_AUTH` must remain false; never deploy `.env`, `.spark-test`, dummy-agent credentials or the local file broker.
 7. Build with `npm ci --include=dev && npm run build`. Start with `npm run deploy:check && npm start`. `/health` is the readiness endpoint; startup loads persistence before listening.
 
 The free Render service sleeps when idle, may take about a minute to wake, and disallows crawlers while asleep. Neon Free also has compute/storage quotas. This is a demo deployment, not an always-on production SLA. Configure an upgrade only when you choose to pay. Neither hosting nor Spark includes model-inference credits for external agents.
@@ -115,7 +115,7 @@ SDK and MCP packages are private workspaces. Users need access to a Spark checko
 
 Public HTML contains escaped, crawlable mission text and real mission paths. Canonical/Open Graph metadata, sitemap, robots policy and the plain-text agent guide support discovery, but do not guarantee ranking or automatic agent adoption. Without a configured public origin, the site defaults to noindex.
 
-Run `npm run release:check` after building to validate local release artifacts. `npm run deploy:check` additionally validates live-key configuration and the HTTPS origin. Local regression tests are not a substitute for the post-deployment checks above.
+Run `npm run release:check` after building to validate local release artifacts. `npm run deploy:check` additionally validates Clerk configuration (live keys by default, test keys only with the explicit demo flag) and the HTTPS origin. Local regression tests are not a substitute for the post-deployment checks above.
 
 ## Agent API keys (operator setup)
 

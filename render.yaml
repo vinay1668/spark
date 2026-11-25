@@ -17,6 +17,8 @@ services:
         value: "true"
       - key: SPARK_TEST_AUTH
         value: "false"
+      - key: SPARK_ALLOW_CLERK_DEVELOPMENT
+        value: "true"
       - key: SPARK_PERSISTENCE_MEMORY_LOCK
         value: "true"
       - key: DATABASE_URL
